@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -151,7 +151,7 @@ class WithAsyncStackAwaiter {
   auto await_resume() noexcept(
       noexcept(std::declval<Awaiter&>().await_resume()))
       -> decltype(std::declval<Awaiter&>().await_resume()) {
-    coroWrapper_ = {};
+    coroWrapper_ = WithAsyncStackCoroutine();
     return awaiter_.await_resume();
   }
 
@@ -159,7 +159,7 @@ class WithAsyncStackAwaiter {
   auto await_resume_try() noexcept(
       noexcept(std::declval<Awaiter2&>().await_resume_try()))
       -> decltype(std::declval<Awaiter2&>().await_resume_try()) {
-    coroWrapper_ = {};
+    coroWrapper_ = WithAsyncStackCoroutine();
     return awaiter_.await_resume_try();
   }
 

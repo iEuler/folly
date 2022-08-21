@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,11 +37,19 @@
 namespace folly {
 namespace symbolizer {
 
+namespace {
+// force a getStackTrace to work around a race condition in the
+// libunwind tdep_init
+static uintptr_t sAddr = 0;
+static ssize_t sInit = getStackTrace(&sAddr, 0);
+} // namespace
+
 ssize_t getStackTrace(
     FOLLY_MAYBE_UNUSED uintptr_t* addresses,
     FOLLY_MAYBE_UNUSED size_t maxAddresses) {
   static_assert(
       sizeof(uintptr_t) == sizeof(void*), "uintptr_t / pointer size mismatch");
+  std::ignore = sInit;
   // The libunwind documentation says that unw_backtrace is
   // async-signal-safe but, as of libunwind 1.0.1, it isn't
   // (tdep_trace allocates memory on x86_64)
@@ -68,6 +76,15 @@ ssize_t getStackTrace(
 
 namespace {
 
+// Heuristic for guessing the maximum stack frame size. This is needed to ensure
+// we do not have stack corruption while walking the stack.
+constexpr size_t kMaxExpectedStackFrameSizeLg2 = sizeof(size_t) == 8
+    ? 36 // 64GB
+    : 28 // 256MB
+    ;
+constexpr size_t kMaxExpectedStackFrameSize //
+    = size_t(1) << kMaxExpectedStackFrameSizeLg2;
+
 #if FOLLY_HAVE_LIBUNWIND
 
 inline bool getFrameInfo(unw_cursor_t* cursor, uintptr_t& ip) {
@@ -86,7 +103,11 @@ inline bool getFrameInfo(unw_cursor_t* cursor, uintptr_t& ip) {
   return true;
 }
 
+// on ppc64le, fails with
+// function can never be inlined because it uses setjmp
+#if FOLLY_PPC64 == 0
 FOLLY_ALWAYS_INLINE
+#endif
 ssize_t getStackTraceInPlace(
     unw_context_t& context,
     unw_cursor_t& cursor,
@@ -127,6 +148,7 @@ ssize_t getStackTraceInPlace(
 ssize_t getStackTraceSafe(
     FOLLY_MAYBE_UNUSED uintptr_t* addresses,
     FOLLY_MAYBE_UNUSED size_t maxAddresses) {
+  std::ignore = sInit;
 #if defined(__APPLE__)
   // While Apple platforms support libunwind, the unw_init_local,
   // unw_step step loop does not cross the boundary from async signal
@@ -148,6 +170,7 @@ ssize_t getStackTraceSafe(
 ssize_t getStackTraceHeap(
     FOLLY_MAYBE_UNUSED uintptr_t* addresses,
     FOLLY_MAYBE_UNUSED size_t maxAddresses) {
+  std::ignore = sInit;
 #if FOLLY_HAVE_LIBUNWIND
   struct Ctx {
     unw_context_t context;
@@ -179,6 +202,16 @@ size_t walkNormalStack(
   size_t numFrames = 0;
   while (numFrames < maxAddresses && normalStackFrame != nullptr) {
     auto* normalStackFrameNext = normalStackFrame->parentFrame;
+    if (!(normalStackFrameNext > normalStackFrame &&
+          normalStackFrameNext <
+              normalStackFrame + kMaxExpectedStackFrameSize)) {
+      // Stack frame addresses should increase as we traverse the stack.
+      // If it doesn't, it means we have stack corruption, or an unusual calling
+      // convention. Ensure that each subsequent frame's address is within a
+      // valid range. If it does not, stop walking the stack early to avoid
+      // incorrect stack walking.
+      break;
+    }
     if (normalStackFrameStop != nullptr &&
         normalStackFrameNext == normalStackFrameStop) {
       // Reached end of normal stack, need to transition to the async stack.

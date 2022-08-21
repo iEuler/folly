@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 
 #include <cassert>
 #include <cstdarg>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -71,7 +72,7 @@ class CursorBase {
     if (crtBuf_) {
       crtPos_ = crtBegin_ = crtBuf_->data();
       crtEnd_ = crtBuf_->tail();
-      if (crtPos_ + len < crtEnd_) {
+      if (uintptr_t(crtPos_) + len < uintptr_t(crtEnd_)) {
         crtEnd_ = crtPos_ + len;
       }
       remainingLen_ = len - (crtEnd_ - crtPos_);
@@ -106,7 +107,7 @@ class CursorBase {
     if (cursor.isBounded() && len > cursor.remainingLen_ + cursor.length()) {
       throw_exception<std::out_of_range>("underflow");
     }
-    if (crtPos_ + len < crtEnd_) {
+    if (uintptr_t(crtPos_) + len < uintptr_t(crtEnd_)) {
       crtEnd_ = crtPos_ + len;
     }
     remainingLen_ = len - (crtEnd_ - crtPos_);
@@ -241,7 +242,7 @@ class CursorBase {
       crtBegin_ = crtBuf_->data();
       crtEnd_ = crtBuf_->tail();
       if (isBounded()) {
-        if (crtBegin_ + remainingLen_ < crtEnd_) {
+        if (uintptr_t(crtBegin_) + remainingLen_ < uintptr_t(crtEnd_)) {
           crtEnd_ = crtBegin_ + remainingLen_;
         }
         remainingLen_ -= crtEnd_ - crtBegin_;
@@ -303,7 +304,7 @@ class CursorBase {
   template <class T>
   typename std::enable_if<std::is_arithmetic<T>::value, bool>::type tryRead(
       T& val) {
-    if (LIKELY(crtPos_ + sizeof(T) <= crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + sizeof(T) <= uintptr_t(crtEnd_))) {
       val = loadUnaligned<T>(data());
       crtPos_ += sizeof(T);
       return true;
@@ -327,7 +328,7 @@ class CursorBase {
 
   template <class T>
   T read() {
-    if (LIKELY(crtPos_ + sizeof(T) <= crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + sizeof(T) <= uintptr_t(crtEnd_))) {
       T val = loadUnaligned<T>(data());
       crtPos_ += sizeof(T);
       return val;
@@ -408,7 +409,7 @@ class CursorBase {
 
   size_t skipAtMost(size_t len) {
     dcheckIntegrity();
-    if (LIKELY(crtPos_ + len < crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + len < uintptr_t(crtEnd_))) {
       crtPos_ += len;
       return len;
     }
@@ -417,7 +418,7 @@ class CursorBase {
 
   void skip(size_t len) {
     dcheckIntegrity();
-    if (LIKELY(crtPos_ + len < crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + len < uintptr_t(crtEnd_))) {
       crtPos_ += len;
     } else {
       skipSlow(len);
@@ -452,9 +453,12 @@ class CursorBase {
   }
 
   size_t pullAtMost(void* buf, size_t len) {
+    if (UNLIKELY(len == 0)) {
+      return 0;
+    }
     dcheckIntegrity();
     // Fast path: it all fits in one buffer.
-    if (LIKELY(crtPos_ + len <= crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + len <= uintptr_t(crtEnd_))) {
       memcpy(buf, data(), len);
       crtPos_ += len;
       return len;
@@ -467,7 +471,7 @@ class CursorBase {
       return;
     }
     dcheckIntegrity();
-    if (LIKELY(crtPos_ + len <= crtEnd_)) {
+    if (LIKELY(uintptr_t(crtPos_) + len <= uintptr_t(crtEnd_))) {
       memcpy(buf, data(), len);
       crtPos_ += len;
     } else {
@@ -630,7 +634,7 @@ class CursorBase {
         (std::size_t)(crtEnd_ - crtBegin_) <= crtBuf_->length());
   }
 
-  ~CursorBase() {}
+  ~CursorBase() = default;
 
   BufType* head() { return buffer_; }
 
@@ -646,7 +650,7 @@ class CursorBase {
     crtPos_ = crtBegin_ = crtBuf_->data();
     crtEnd_ = crtBuf_->tail();
     if (isBounded()) {
-      if (crtPos_ + remainingLen_ < crtEnd_) {
+      if (uintptr_t(crtPos_) + remainingLen_ < uintptr_t(crtEnd_)) {
         crtEnd_ = crtPos_ + remainingLen_;
       }
       remainingLen_ -= crtEnd_ - crtPos_;
@@ -715,25 +719,27 @@ class CursorBase {
   }
 
   FOLLY_NOINLINE size_t pullAtMostSlow(void* buf, size_t len) {
-    // If the length of this buffer is 0 try advancing it.
-    // Otherwise on the first iteration of the following loop memcpy is called
-    // with a null source pointer.
-    if (UNLIKELY(length() == 0 && !tryAdvanceBuffer())) {
-      return 0;
-    }
     uint8_t* p = reinterpret_cast<uint8_t*>(buf);
     size_t copied = 0;
     for (size_t available; (available = length()) < len;) {
-      memcpy(p, data(), available);
-      copied += available;
+      if (available > 0) {
+        // Don't try to copy from 0-length buffers, since they could have
+        // a null data() pointer.
+        memcpy(p, data(), available);
+        copied += available;
+      }
       if (UNLIKELY(!tryAdvanceBuffer())) {
         return copied;
       }
       p += available;
       len -= available;
     }
-    memcpy(p, data(), len);
-    crtPos_ += len;
+    if (len > 0) {
+      // Don't try to copy from 0-length buffers, since they could have
+      // a null data() pointer.
+      memcpy(p, data(), len);
+      crtPos_ += len;
+    }
     advanceBufferIfEmpty();
     return copied + len;
   }
@@ -811,10 +817,12 @@ template <class Derived>
 class Writable {
  public:
   template <class T>
-  typename std::enable_if<std::is_arithmetic<T>::value>::type write(T value) {
+  typename std::enable_if<std::is_arithmetic<T>::value>::type write(
+      T value, size_t n = sizeof(T)) {
+    assert(n <= sizeof(T));
     const uint8_t* u8 = reinterpret_cast<const uint8_t*>(&value);
     Derived* d = static_cast<Derived*>(this);
-    d->push(u8, sizeof(T));
+    d->push(u8, n);
   }
 
   template <class T>
@@ -996,7 +1004,7 @@ class RWCursor : public detail::CursorBase<RWCursor<access>, IOBuf>,
       }
       this->crtBuf_->trimEnd(this->length());
       this->absolutePos_ += this->crtPos_ - this->crtBegin_;
-      this->crtBuf_->appendChain(std::move(buf));
+      this->crtBuf_->insertAfterThisOne(std::move(buf));
 
       if (nextBuf == this->buffer_) {
         // We've just appended to the end of the buffer, so advance to the end.
@@ -1201,13 +1209,15 @@ class QueueAppender : public detail::Writable<QueueAppender> {
   }
 
   template <class T>
-  typename std::enable_if<std::is_arithmetic<T>::value>::type write(T value) {
+  typename std::enable_if<std::is_arithmetic<T>::value>::type write(
+      T value, size_t n = sizeof(T)) {
     // We can't fail.
+    assert(n <= sizeof(T));
     if (length() >= sizeof(T)) {
       storeUnaligned(queueCache_.writableData(), value);
-      queueCache_.appendUnsafe(sizeof(T));
+      queueCache_.appendUnsafe(n);
     } else {
-      writeSlow<T>(value);
+      writeSlow<T>(value, n);
     }
   }
 
@@ -1235,12 +1245,14 @@ class QueueAppender : public detail::Writable<QueueAppender> {
 
   void insert(std::unique_ptr<folly::IOBuf> buf) {
     if (buf) {
-      queueCache_.queue()->append(std::move(buf), true);
+      queueCache_.queue()->append(
+          std::move(buf), /* pack */ true, /* allowTailReuse */ true);
     }
   }
 
   void insert(const folly::IOBuf& buf) {
-    queueCache_.queue()->append(buf, true);
+    queueCache_.queue()->append(
+        buf, /* pack */ true, /* allowTailReuse */ true);
   }
 
   template <CursorAccess access>
@@ -1259,12 +1271,13 @@ class QueueAppender : public detail::Writable<QueueAppender> {
 
   template <class T>
   typename std::enable_if<std::is_arithmetic<T>::value>::type FOLLY_NOINLINE
-  writeSlow(T value) {
+  writeSlow(T value, size_t n = sizeof(T)) {
+    assert(n <= sizeof(T));
     queueCache_.queue()->preallocate(sizeof(T), growth_);
     queueCache_.fillCache();
 
     storeUnaligned(queueCache_.writableData(), value);
-    queueCache_.appendUnsafe(sizeof(T));
+    queueCache_.appendUnsafe(n);
   }
 };
 

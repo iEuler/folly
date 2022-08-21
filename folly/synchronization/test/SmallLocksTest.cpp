@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,10 +40,7 @@
 using folly::MicroLock;
 using folly::MicroSpinLock;
 using folly::MSLGuard;
-
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
 using folly::PicoSpinLock;
-#endif
 
 DEFINE_int64(
     stress_test_seconds, 2, "Number of seconds for which to run stress tests");
@@ -69,13 +66,11 @@ struct ignore1 {
 } FOLLY_PACK_ATTR;
 static_assert(sizeof(ignore1) == 3, "Size check failed");
 static_assert(sizeof(MicroSpinLock) == 1, "Size check failed");
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
 struct ignore2 {
   PicoSpinLock<uint32_t> psl;
   int16_t foo;
 } FOLLY_PACK_ATTR;
 static_assert(sizeof(ignore2) == 6, "Size check failed");
-#endif
 FOLLY_PACK_POP
 
 LockedVal v;
@@ -93,7 +88,6 @@ void splock_test() {
   }
 }
 
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
 template <class T>
 struct PslTest {
   PicoSpinLock<T> lock;
@@ -127,7 +121,6 @@ void doPslTest() {
     t.join();
   }
 }
-#endif
 
 struct TestClobber {
   TestClobber() { lock_.init(); }
@@ -158,7 +151,6 @@ TEST(SmallLocks, SpinLockCorrectness) {
   }
 }
 
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
 TEST(SmallLocks, PicoSpinCorrectness) {
   doPslTest<int16_t>();
   doPslTest<uint16_t>();
@@ -210,7 +202,6 @@ TEST(SmallLocks, PicoSpinLockThreadSanitizer) {
     }
   }
 }
-#endif
 
 TEST(SmallLocks, RegClobber) {
   TestClobber().go();
@@ -267,7 +258,6 @@ TEST(SmallLocks, MicroLock) {
 
   x.a = 'a';
   x.b = origB;
-  x.alock.init();
   x.d = origD;
 
   // This thread touches other parts of the host word to show that
@@ -317,7 +307,6 @@ TEST(SmallLocks, MicroLock) {
 
 TEST(SmallLocks, MicroLockTryLock) {
   MicroLock lock;
-  lock.init();
   EXPECT_TRUE(lock.try_lock());
   EXPECT_FALSE(lock.try_lock());
   lock.unlock();
@@ -325,7 +314,6 @@ TEST(SmallLocks, MicroLockTryLock) {
 
 TEST(SmallLocks, MicroLockWithData) {
   MicroLock lock;
-  lock.init();
   EXPECT_EQ(lock.load(std::memory_order_relaxed), 0);
 
   EXPECT_EQ(lock.lockAndLoad(), 0);
@@ -363,7 +351,6 @@ TEST(SmallLocks, MicroLockDataAlignment) {
     uint8_t padding2;
   } thing;
   auto& lock = thing.lock;
-  lock.init();
 
   EXPECT_EQ(lock.lockAndLoad(), 0);
   lock.unlockAndStore(60);

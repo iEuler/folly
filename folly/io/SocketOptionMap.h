@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,14 +32,21 @@ class SocketOptionKey {
  public:
   enum class ApplyPos { POST_BIND = 0, PRE_BIND = 1 };
 
-  bool operator<(const SocketOptionKey& other) const {
-    if (level == other.level) {
-      return optname < other.optname;
+  friend bool operator<(
+      const SocketOptionKey& lhs, const SocketOptionKey& rhs) {
+    if (lhs.level == rhs.level) {
+      return lhs.optname < rhs.optname;
     }
-    return level < other.level;
+    return lhs.level < rhs.level;
+  }
+
+  friend bool operator==(
+      const SocketOptionKey& lhs, const SocketOptionKey& rhs) {
+    return lhs.level == rhs.level && lhs.optname == rhs.optname;
   }
 
   int apply(NetworkSocket fd, int val) const;
+  int apply(NetworkSocket fd, const void* val, socklen_t len) const;
 
   int level;
   int optname;
@@ -48,16 +55,28 @@ class SocketOptionKey {
 
 // Maps from a socket option key to its value
 using SocketOptionMap = std::map<SocketOptionKey, int>;
+using SocketNontrivialOptionMap = std::map<SocketOptionKey, std::string>;
 
 extern const SocketOptionMap emptySocketOptionMap;
+extern const SocketNontrivialOptionMap emptySocketNontrivialOptionMap;
 
 int applySocketOptions(
     NetworkSocket fd,
     const SocketOptionMap& options,
     SocketOptionKey::ApplyPos pos);
 
+int applySocketOptions(
+    NetworkSocket fd,
+    const SocketNontrivialOptionMap& options,
+    SocketOptionKey::ApplyPos pos);
+
 SocketOptionMap validateSocketOptions(
     const SocketOptionMap& options,
+    sa_family_t family,
+    SocketOptionKey::ApplyPos pos);
+
+SocketNontrivialOptionMap validateSocketOptions(
+    const SocketNontrivialOptionMap& options,
     sa_family_t family,
     SocketOptionKey::ApplyPos pos);
 

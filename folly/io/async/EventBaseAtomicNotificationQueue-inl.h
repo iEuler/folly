@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 #pragma once
 
 #include <folly/FileUtil.h>
-#include <folly/io/async/EventBaseAtomicNotificationQueue.h>
 #include <folly/system/Pid.h>
 
 namespace folly {
@@ -28,7 +27,7 @@ EventBaseAtomicNotificationQueue<Task, Consumer>::
     : pid_(get_cached_pid()),
       notificationQueue_(),
       consumer_(std::move(consumer)) {
-#ifdef FOLLY_HAVE_EVENTFD
+#if __has_include(<sys/eventfd.h>)
   eventfd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (eventfd_ == -1) {
     if (errno == ENOSYS || errno == EINVAL) {

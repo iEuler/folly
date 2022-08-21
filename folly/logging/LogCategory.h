@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -154,7 +154,7 @@ class LogCategory {
    * Get which messages processed by this category will be processed by the
    * parent category
    */
-  LogLevel getPropagateLevelMessagesToParentRelaxed();
+  LogLevel getPropagateLevelMessagesToParentRelaxed() const;
 
   /**
    * Get the LoggerDB that this LogCategory belongs to.

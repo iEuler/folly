@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ bool Baton::waitImpl(WaitOperation* awaiter) const noexcept {
   } while (!folly::atomic_compare_exchange_weak_explicit(
       &state_,
       &oldValue,
-      static_cast<void*>(awaiter),
+      awaiter,
       std::memory_order_release,
       std::memory_order_acquire));
   return true;

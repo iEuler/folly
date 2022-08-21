@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,19 +27,25 @@ class MockAsyncTransportLifecycleObserver
     : public AsyncTransport::LifecycleObserver {
  public:
   using AsyncTransport::LifecycleObserver::LifecycleObserver;
-  MOCK_METHOD1(observerAttachMock, void(AsyncTransport*));
-  MOCK_METHOD1(observerDetachMock, void(AsyncTransport*));
-  MOCK_METHOD1(destroyMock, void(AsyncTransport*));
-  MOCK_METHOD1(closeMock, void(AsyncTransport*));
-  MOCK_METHOD1(connectMock, void(AsyncTransport*));
-  MOCK_METHOD2(evbAttachMock, void(AsyncTransport*, EventBase*));
-  MOCK_METHOD2(evbDetachMock, void(AsyncTransport*, EventBase*));
-  MOCK_METHOD2(
-      byteEventMock, void(AsyncTransport*, const AsyncTransport::ByteEvent&));
-  MOCK_METHOD1(byteEventsEnabledMock, void(AsyncTransport*));
-  MOCK_METHOD2(
+  MOCK_METHOD(void, observerAttachMock, (AsyncTransport*));
+  MOCK_METHOD(void, observerDetachMock, (AsyncTransport*));
+  MOCK_METHOD(void, destroyMock, (AsyncTransport*));
+  MOCK_METHOD(void, closeMock, (AsyncTransport*));
+  MOCK_METHOD(void, connectAttemptMock, (AsyncTransport*));
+  MOCK_METHOD(void, connectSuccessMock, (AsyncTransport*));
+  MOCK_METHOD(
+      void, connectErrorMock, (AsyncTransport*, const AsyncSocketException&));
+  MOCK_METHOD(void, evbAttachMock, (AsyncTransport*, EventBase*));
+  MOCK_METHOD(void, evbDetachMock, (AsyncTransport*, EventBase*));
+  MOCK_METHOD(
+      void, byteEventMock, (AsyncTransport*, const AsyncTransport::ByteEvent&));
+  MOCK_METHOD(void, byteEventsEnabledMock, (AsyncTransport*));
+  MOCK_METHOD(
+      void,
       byteEventsUnavailableMock,
-      void(AsyncTransport*, const AsyncSocketException&));
+      (AsyncTransport*, const AsyncSocketException&));
+  MOCK_METHOD(
+      PrewriteRequest, prewriteMock, (AsyncTransport*, const PrewriteState&));
 
  private:
   void observerAttach(AsyncTransport* trans) noexcept override {
@@ -50,7 +56,16 @@ class MockAsyncTransportLifecycleObserver
   }
   void destroy(AsyncTransport* trans) noexcept override { destroyMock(trans); }
   void close(AsyncTransport* trans) noexcept override { closeMock(trans); }
-  void connect(AsyncTransport* trans) noexcept override { connectMock(trans); }
+  void connectAttempt(AsyncTransport* trans) noexcept override {
+    connectAttemptMock(trans);
+  }
+  void connectSuccess(AsyncTransport* trans) noexcept override {
+    connectSuccessMock(trans);
+  }
+  void connectError(
+      AsyncTransport* trans, const AsyncSocketException& ex) noexcept override {
+    connectErrorMock(trans, ex);
+  }
   void evbAttach(AsyncTransport* trans, EventBase* eb) noexcept override {
     evbAttachMock(trans, eb);
   }
@@ -68,6 +83,10 @@ class MockAsyncTransportLifecycleObserver
   void byteEventsUnavailable(
       AsyncTransport* trans, const AsyncSocketException& ex) noexcept override {
     byteEventsUnavailableMock(trans, ex);
+  }
+  PrewriteRequest prewrite(
+      AsyncTransport* trans, const PrewriteState& state) noexcept override {
+    return prewriteMock(trans, state);
   }
 };
 
@@ -104,6 +123,10 @@ class MockAsyncTransportObserverForByteEvents
               byteEventsUnavailableCalledEx_.emplace(ex);
             }));
     transport->addLifecycleObserver(this);
+  }
+
+  const std::vector<AsyncTransport::ByteEvent>& getByteEvents() {
+    return byteEvents_;
   }
 
   folly::Optional<AsyncTransport::ByteEvent> getByteEventReceivedWithOffset(

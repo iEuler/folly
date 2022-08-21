@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,9 +37,10 @@ void bench(
   static std::vector<size_t> src_offsets;
 
   BENCHMARK_SUSPEND {
-    size_t src_buffer_size = sysconf(_SC_PAGE_SIZE) *
-        std::ceil(static_cast<double>(max + 2 * align) /
-                  sysconf(_SC_PAGE_SIZE));
+    size_t src_buffer_size = folly::to_integral(
+        sysconf(_SC_PAGE_SIZE) *
+        std::ceil(
+            static_cast<double>(max + 2 * align) / sysconf(_SC_PAGE_SIZE)));
     size_t dst_buffer_size;
     if (hot) {
       dst_buffer_size = src_buffer_size;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -207,127 +207,11 @@ class ReadCallback : public folly::AsyncTransport::ReadCallback {
 };
 
 class ReadvCallback : public folly::AsyncTransport::ReadCallback {
- private:
-  class IOBufVecQueue {
-   private:
-    struct RefCountMem {
-      explicit RefCountMem(size_t size) {
-        mem_ = ::malloc(size);
-        len_ = size;
-      }
-
-      ~RefCountMem() { ::free(mem_); }
-
-      void* usableMem() const {
-        return reinterpret_cast<uint8_t*>(mem_) + used_;
-      }
-
-      size_t usableSize() const { return len_ - used_; }
-
-      void incUsedMem(size_t len) { used_ += len; }
-
-      static void freeMem(void* buf, void* userData) {
-        std::ignore = buf;
-        reinterpret_cast<RefCountMem*>(userData)->decRef();
-      }
-
-      void addRef() { ++count_; }
-
-      void decRef() {
-        if (--count_ == 0) {
-          delete this;
-        }
-      }
-
-     private:
-      std::atomic<size_t> count_{1};
-      void* mem_{nullptr};
-      size_t len_{0};
-      size_t used_{0};
-    };
-
-   public:
-    struct Options {
-      static constexpr size_t kBlockSize = 16 * 1024;
-      size_t blockSize_{kBlockSize};
-    };
-
-    IOBufVecQueue() = default;
-    explicit IOBufVecQueue(const Options& options) : options_(options) {}
-    ~IOBufVecQueue() {
-      for (auto& buf : buffers_) {
-        buf->decRef();
-      }
-    }
-
-    static Options getBlockSizeOptions(size_t blockSize) {
-      Options options;
-      options.blockSize_ = blockSize;
-
-      return options;
-    }
-
-    size_t preallocate(size_t len, struct iovec* iovs, size_t num) {
-      size_t total = 0;
-      size_t i = 0;
-      for (; (i < num) && (total < len); ++i) {
-        if (i >= buffers_.size()) {
-          buffers_.push_back(new RefCountMem(options_.blockSize_));
-        }
-
-        iovs[i].iov_base = buffers_[i]->usableMem();
-        iovs[i].iov_len = buffers_[i]->usableSize();
-
-        total += buffers_[i]->usableSize();
-      }
-
-      return i;
-    }
-
-    std::unique_ptr<folly::IOBuf> postallocate(size_t len) {
-      std::unique_ptr<folly::IOBuf> ret, tmp;
-
-      while (len > 0) {
-        CHECK(!buffers_.empty());
-        auto* buf = buffers_.front();
-        auto size = buf->usableSize();
-
-        if (len >= size) {
-          // no need to inc the ref count since we're transferring ownership
-          tmp = folly::IOBuf::takeOwnership(
-              buf->usableMem(), size, RefCountMem::freeMem, buf);
-          buffers_.pop_front();
-          len -= size;
-        } else {
-          buf->addRef();
-          tmp = folly::IOBuf::takeOwnership(
-              buf->usableMem(), len, RefCountMem::freeMem, buf);
-          buf->incUsedMem(len);
-          len = 0;
-        }
-
-        CHECK(!tmp->isShared());
-
-        if (ret) {
-          ret->prependChain(std::move(tmp));
-        } else {
-          ret = std::move(tmp);
-        }
-      }
-
-      return ret;
-    }
-
-   private:
-    Options options_;
-    std::deque<RefCountMem*> buffers_;
-  };
-
  public:
   ReadvCallback(size_t bufferSize, size_t len)
       : state_(STATE_WAITING),
         exception_(folly::AsyncSocketException::UNKNOWN, "none"),
-        queue_(IOBufVecQueue::getBlockSizeOptions(bufferSize)),
+        queue_(folly::IOBufIovecBuilder::Options().setBlockSize(bufferSize)),
         len_(len) {
     setReadMode(folly::AsyncTransport::ReadCallback::ReadMode::ReadVec);
   }
@@ -341,12 +225,12 @@ class ReadvCallback : public folly::AsyncTransport::ReadCallback {
     CHECK(false); // this should not be called
   }
 
-  size_t getReadBuffers(struct iovec* iovs, size_t num) override {
-    return queue_.preallocate(len_, iovs, num);
+  void getReadBuffers(folly::IOBufIovecBuilder::IoVecVec& iovs) override {
+    queue_.allocateBuffers(iovs, len_);
   }
 
   void readDataAvailable(size_t len) noexcept override {
-    auto tmp = queue_.postallocate(len);
+    auto tmp = queue_.extractIOBufChain(len);
     if (!buf_) {
       buf_ = std::move(tmp);
     } else {
@@ -374,7 +258,7 @@ class ReadvCallback : public folly::AsyncTransport::ReadCallback {
  private:
   StateEnum state_;
   folly::AsyncSocketException exception_;
-  IOBufVecQueue queue_;
+  folly::IOBufIovecBuilder queue_;
   std::unique_ptr<folly::IOBuf> buf_;
   const size_t len_;
 };
@@ -412,6 +296,147 @@ class BufferCallback : public folly::AsyncTransport::BufferCallback {
   size_t expectedBytes_{0};
   bool buffered_{false};
   bool bufferCleared_{false};
+};
+
+class ZeroCopyReadCallback : public folly::AsyncTransport::ReadCallback {
+ public:
+  explicit ZeroCopyReadCallback(
+      folly::AsyncTransport::ReadCallback::ZeroCopyMemStore* memStore,
+      size_t _maxBufferSz = 4096)
+      : memStore_(memStore),
+        state(STATE_WAITING),
+        exception(folly::AsyncSocketException::UNKNOWN, "none"),
+        maxBufferSz(_maxBufferSz) {}
+
+  ~ZeroCopyReadCallback() override { currentBuffer.free(); }
+
+  // zerocopy
+  folly::AsyncTransport::ReadCallback::ZeroCopyMemStore*
+  readZeroCopyEnabled() noexcept override {
+    return memStore_;
+  }
+
+  void getZeroCopyFallbackBuffer(
+      void** bufReturn, size_t* lenReturn) noexcept override {
+    if (!currentZeroCopyBuffer.buffer) {
+      currentZeroCopyBuffer.allocate(maxBufferSz);
+    }
+    *bufReturn = currentZeroCopyBuffer.buffer;
+    *lenReturn = currentZeroCopyBuffer.length;
+  }
+
+  void readZeroCopyDataAvailable(
+      std::unique_ptr<folly::IOBuf>&& zeroCopyData,
+      size_t additionalBytes) noexcept override {
+    auto ioBuf = std::move(zeroCopyData);
+    if (additionalBytes) {
+      auto tmp = folly::IOBuf::takeOwnership(
+          currentZeroCopyBuffer.buffer,
+          currentZeroCopyBuffer.length,
+          0,
+          additionalBytes);
+      currentZeroCopyBuffer.reset();
+      if (ioBuf) {
+        ioBuf->prependChain(std::move(tmp));
+      } else {
+        ioBuf = std::move(tmp);
+      }
+    }
+
+    if (!data_) {
+      data_ = std::move(ioBuf);
+    } else {
+      data_->prependChain(std::move(ioBuf));
+    }
+  }
+
+  void getReadBuffer(void** bufReturn, size_t* lenReturn) override {
+    if (!currentBuffer.buffer) {
+      currentBuffer.allocate(maxBufferSz);
+    }
+    *bufReturn = currentBuffer.buffer;
+    *lenReturn = currentBuffer.length;
+  }
+
+  void readDataAvailable(size_t len) noexcept override {
+    auto ioBuf = folly::IOBuf::takeOwnership(
+        currentBuffer.buffer, currentBuffer.length, 0, len);
+    currentBuffer.reset();
+
+    if (!data_) {
+      data_ = std::move(ioBuf);
+    } else {
+      data_->prependChain(std::move(ioBuf));
+    }
+  }
+
+  void readEOF() noexcept override { state = STATE_SUCCEEDED; }
+
+  void readErr(const folly::AsyncSocketException& ex) noexcept override {
+    state = STATE_FAILED;
+    exception = ex;
+  }
+
+  void verifyData(const std::string& expected) const {
+    verifyData((const unsigned char*)expected.data(), expected.size());
+  }
+
+  void verifyData(const unsigned char* expected, size_t expectedLen) const {
+    CHECK(!!data_);
+    auto len = data_->computeChainDataLength();
+    CHECK_EQ(len, expectedLen);
+
+    auto* buf = data_.get();
+    auto* current = buf;
+    size_t offset = 0;
+
+    do {
+      size_t cmpLen = std::min(current->length(), expectedLen - offset);
+      CHECK_EQ(cmpLen, current->length());
+      CHECK_EQ(memcmp(current->data(), expected + offset, cmpLen), 0);
+      offset += cmpLen;
+
+      current = current->next();
+    } while (current != buf);
+
+    std::ignore = expected;
+    CHECK_EQ(offset, expectedLen);
+  }
+
+  class Buffer {
+   public:
+    Buffer() = default;
+    Buffer(char* buf, size_t len) : buffer(buf), length(len) {}
+    ~Buffer() {
+      if (buffer) {
+        ::free(buffer);
+      }
+    }
+
+    void reset() {
+      buffer = nullptr;
+      length = 0;
+    }
+    void allocate(size_t len) {
+      CHECK(buffer == nullptr);
+      buffer = static_cast<char*>(malloc(len));
+      length = len;
+    }
+    void free() {
+      ::free(buffer);
+      reset();
+    }
+
+    char* buffer{nullptr};
+    size_t length{0};
+  };
+  folly::AsyncTransport::ReadCallback::ZeroCopyMemStore* memStore_;
+  StateEnum state;
+  folly::AsyncSocketException exception;
+  Buffer currentBuffer, currentZeroCopyBuffer;
+  VoidCallback dataAvailableCallback;
+  const size_t maxBufferSz;
+  std::unique_ptr<folly::IOBuf> data_;
 };
 
 class ReadVerifier {};

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,6 +39,8 @@ namespace {
 
 ////////////////////////////////////////////////////
 // native implementation using the futex() syscall
+
+// The native implementation of futex wake must be async-signal-safe.
 
 #ifdef __linux__
 
@@ -160,6 +162,8 @@ FutexResult nativeFutexWaitImpl(
 
 ///////////////////////////////////////////////////////
 // compatibility implementation using standard C++ API
+
+// This implementation may be non-async-signal-safe.
 
 using Lot = ParkingLot<uint32_t>;
 Lot parkingLot;

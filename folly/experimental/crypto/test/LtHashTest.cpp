@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,12 +57,14 @@ struct IsLtHash<LtHash<B, N>> {
 
 } // namespace
 
+namespace folly::crypto {
 // Needed so an EXPECT_EQ() or EXPECT_NE() failure prints the LtHash checksum.
 template <std::size_t B, std::size_t N>
 static std::ostream& operator<<(std::ostream& os, const LtHash<B, N>& h) {
   os << toHex(*h.getChecksum());
   return os;
 }
+} // namespace folly::crypto
 
 // Note: the template parameter H must be an instance of LtHash<B, N> for some
 // valid B and N.

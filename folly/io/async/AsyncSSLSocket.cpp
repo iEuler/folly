@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,21 +60,6 @@ SpinLock dummyCtxLock;
 // If given min write size is less than this, buffer will be allocated on
 // stack, otherwise it is allocated on heap
 const size_t MAX_STACK_BUF_SIZE = 2048;
-
-// This converts "illegal" shutdowns into ZERO_RETURN
-inline bool zero_return(int error, int rc, int errno_copy) {
-  if (error == SSL_ERROR_ZERO_RETURN || (rc == 0 && errno_copy == 0)) {
-    return true;
-  }
-#ifdef _WIN32
-  // on windows underlying TCP socket may error with this code
-  // if the sending/receiving client crashes or is killed
-  if (error == SSL_ERROR_SYSCALL && errno_copy == WSAECONNRESET) {
-    return true;
-  }
-#endif
-  return false;
-}
 
 void setup_SSL_CTX(SSL_CTX* ctx) {
 #ifdef SSL_MODE_RELEASE_BUFFERS
@@ -408,6 +393,13 @@ void AsyncSSLSocket::shutdownWriteNow() {
   closeNow();
 }
 
+bool AsyncSSLSocket::readable() const {
+  if (ssl_ != nullptr && SSL_pending(ssl_.get()) > 0) {
+    return true;
+  }
+  return AsyncSocket::readable();
+}
+
 bool AsyncSSLSocket::good() const {
   return (
       AsyncSocket::good() &&
@@ -435,6 +427,58 @@ std::string AsyncSSLSocket::getApplicationProtocol() const noexcept {
     return std::string(reinterpret_cast<const char*>(protoName), protoLength);
   }
   return "";
+}
+
+std::unique_ptr<IOBuf> AsyncSSLSocket::getExportedKeyingMaterial(
+    folly::StringPiece label,
+    std::unique_ptr<IOBuf> context,
+    uint16_t length) const {
+  if (!ssl_ || sslState_ != STATE_ESTABLISHED) {
+    return nullptr;
+  }
+
+  /*
+   * We would like to only export EKM in the case where the extended master
+   * secret is used (per rfc7627). Note that for TLS1.3 this is by default. For
+   * TLS1.2 this has to be negotiated, so we will check that specifically. The
+   * usage of extended master secret prevents synchronization of master secrets
+   * across sessions.
+   */
+  if (getSSLVersion() < TLS1_2_VERSION) {
+    return nullptr;
+  }
+
+  if (getSSLVersion() == TLS1_2_VERSION && !SSL_get_extms_support(ssl_.get())) {
+    return nullptr;
+  }
+  auto buf = IOBuf::create(length);
+  const unsigned char* contextBuf = nullptr;
+  size_t contextLength = 0;
+  if (context) {
+    auto contextBytes = context->coalesce();
+    contextBuf = contextBytes.data();
+    contextLength = contextBytes.size();
+  }
+
+  if (SSL_export_keying_material(
+          ssl_.get(),
+          buf->writableTail(),
+          (size_t)length,
+          label.data(),
+          label.size(),
+          contextBuf,
+          contextLength,
+          contextBuf != nullptr) != 1) {
+    return nullptr;
+  }
+  buf->append(length);
+
+  return buf;
+}
+
+void AsyncSSLSocket::setSupportedApplicationProtocols(
+    const std::vector<std::string>& supportedProtocols) {
+  encodedAlpn_ = OpenSSLUtils::encodeALPNString(supportedProtocols);
 }
 
 void AsyncSSLSocket::setEorTracking(bool track) {
@@ -695,7 +739,7 @@ void AsyncSSLSocket::failHandshake(
     handshakeTimeout_.cancelTimeout();
   }
   invokeHandshakeErr(ex);
-  finishFail();
+  finishFail(ex);
 }
 
 void AsyncSSLSocket::invokeHandshakeErr(const AsyncSocketException& ex) {
@@ -869,6 +913,19 @@ void AsyncSSLSocket::sslConn(
     LOG(ERROR) << "AsyncSSLSocket::sslConn(this=" << this << ", fd=" << fd_
                << "): " << e.what();
     return failHandshake(__func__, *ex);
+  }
+
+  if (!encodedAlpn_.empty()) {
+    int result = SSL_set_alpn_protos(
+        ssl_.get(),
+        reinterpret_cast<const unsigned char*>(encodedAlpn_.c_str()),
+        static_cast<unsigned int>(encodedAlpn_.size()));
+    if (result != 0) {
+      static const Indestructible<AsyncSocketException> ex(
+          AsyncSocketException::INTERNAL_ERROR,
+          "error setting SSL alpn protos");
+      return failHandshake(__func__, *ex);
+    }
   }
 
   if (!setupSSLBio()) {
@@ -1238,6 +1295,16 @@ void AsyncSSLSocket::handleAccept() noexcept {
       });
 }
 
+const char* AsyncSSLSocket::getNegotiatedGroup() const {
+#if FOLLY_OPENSSL_PREREQ(1, 1, 1)
+  auto nid = SSL_get_shared_group(const_cast<SSL*>(this->getSSL()), 0);
+  const char* longname = OBJ_nid2ln((int)nid);
+  return longname;
+#else
+  return nullptr;
+#endif
+}
+
 void AsyncSSLSocket::handleReturnFromSSLAccept(int ret) {
   if (sslState_ != STATE_ACCEPTING) {
     return;
@@ -1485,8 +1552,36 @@ AsyncSocket::ReadResult AsyncSSLSocket::performRead(
           READ_ERROR,
           std::make_unique<SSLException>(SSLError::INVALID_RENEGOTIATION));
     } else {
-      if (zero_return(error, bytes, errno)) {
-        return ReadResult(bytes);
+      if (error == SSL_ERROR_ZERO_RETURN) {
+        // Peer has closed the connection for writing by sending the
+        // close_notify alert. The underlying transport might not be closed, but
+        // assume it is and return EOF.
+        VLOG(6) << "AsyncSSLSocket(fd=" << fd_ << ", "
+                << "state=" << state_ << ", "
+                << "sslState=" << sslState_ << ", "
+                << "events=" << std::hex << eventFlags_ << "): "
+                << "bytes: " << bytes << ", "
+                << "error: " << error << ", "
+                << "received close_notify alert";
+        // AsyncSSLSocket interprets this as a READ_EOF.
+        return ReadResult(0);
+      }
+      int local_errno = errno;
+#ifdef _WIN32
+      // On windows, the underlying TCP socket may error with this code
+      // if the sending/receiving client crashes or is killed.
+      if (error == SSL_ERROR_SYSCALL && local_errno == WSAECONNRESET) {
+        return ReadResult(0);
+      }
+#endif
+      // NOTE: OpenSSL has a bug where SSL_ERROR_SYSCALL and errno 0 indicates
+      // an unexpected EOF from the peer. This will be changed in OpenSSL 3.0
+      // and reported as SSL_ERROR_SSL with reason
+      // SSL_R_UNEXPECTED_EOF_WHILE_READING. We should then explicitly check for
+      // that. See https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html
+      if (error == SSL_ERROR_SYSCALL && local_errno == 0) {
+        // intentionally returning EOF
+        return ReadResult(0);
       }
       auto errError = ERR_get_error();
       VLOG(6) << "AsyncSSLSocket(fd=" << fd_ << ", "
@@ -1495,17 +1590,45 @@ AsyncSocket::ReadResult AsyncSSLSocket::performRead(
               << "events=" << std::hex << eventFlags_ << "): "
               << "bytes: " << bytes << ", "
               << "error: " << error << ", "
-              << "errno: " << errno << ", "
+              << "errno: " << local_errno << ", "
               << "func: " << ERR_func_error_string(errError) << ", "
               << "reason: " << ERR_reason_error_string(errError);
       return ReadResult(
           READ_ERROR,
-          std::make_unique<SSLException>(error, errError, bytes, errno));
+          std::make_unique<SSLException>(error, errError, bytes, local_errno));
     }
   } else {
     appBytesReceived_ += bytes;
     return ReadResult(bytes);
   }
+}
+
+AsyncSocket::ReadResult AsyncSSLSocket::performReadv(
+    struct iovec* iovs, size_t num) {
+  ssize_t totalRead = 0;
+  ssize_t res = 1;
+  for (size_t i = 0; i < num && res > 0; i++) {
+    auto* buf = iovs[i].iov_base;
+    auto bufLen = iovs[i].iov_len;
+    while (bufLen > 0 && res > 0) {
+      // Should offset be into buf?  It seems unused.  Also buf and buflen
+      // are not really out params anymore.
+      size_t offset = 0;
+      auto readRes = performRead(&buf, &bufLen, &offset);
+      res = readRes.readReturn;
+      if (res > 0) {
+        CHECK_GE(bufLen, res);
+        buf = static_cast<uint8_t*>(buf) + res;
+        bufLen -= res;
+        totalRead += res;
+      } else if (ReadResultEnum(res) == READ_ERROR) {
+        return readRes;
+      } else if (ReadResultEnum(res) == READ_BLOCKING) {
+        return ReadResult(totalRead);
+      }
+    }
+  }
+  return ReadResult(totalRead);
 }
 
 void AsyncSSLSocket::handleWrite() noexcept {
@@ -1872,14 +1995,13 @@ int AsyncSSLSocket::sslVerifyCallback(
   auto cert = std::make_unique<BasicTransportCertificate>(
       std::move(cn), std::move(peer));
 
-  auto certVerifyResult =
-      self->certificateIdentityVerifier_->verifyLeaf(*cert.get());
-
-  if (certVerifyResult.hasException()) {
+  try {
+    self->setPeerCertificate(
+        self->certificateIdentityVerifier_->verifyLeaf(*cert.get()));
+  } catch (folly::CertificateIdentityVerifierException& e) {
     LOG(ERROR) << "AsyncSSLSocket::sslVerifyCallback(this=" << self
                << ", fd=" << self->fd_
-               << ") Failed to verify leaf certificate identity(ies): "
-               << folly::exceptionStr(certVerifyResult.exception());
+               << ") Failed to verify leaf certificate identity(ies): " << e;
     return 0;
   }
 
@@ -1906,7 +2028,22 @@ void AsyncSSLSocket::enableClientHelloParsing() {
 void AsyncSSLSocket::resetClientHelloParsing(SSL* ssl) {
   SSL_set_msg_callback(ssl, nullptr);
   SSL_set_msg_callback_arg(ssl, nullptr);
-  clientHelloInfo_->clientHelloBuf_.clear();
+  clientHelloInfo_->clientHelloBuf_.reset();
+}
+
+void AsyncSSLSocket::parseClientAlpns(
+    AsyncSSLSocket* sock,
+    folly::io::Cursor& cursor,
+    uint16_t& extensionDataLength) {
+  cursor.skip(2);
+  extensionDataLength -= 2;
+  while (extensionDataLength) {
+    auto protoLength = cursor.readBE<uint8_t>();
+    extensionDataLength--;
+    auto proto = cursor.readFixedString(protoLength);
+    sock->clientHelloInfo_->clientAlpns_.push_back(proto);
+    extensionDataLength -= protoLength;
+  }
 }
 
 void AsyncSSLSocket::clientHelloParsingCallback(
@@ -2033,6 +2170,10 @@ void AsyncSSLSocket::clientHelloParsingCallback(
             extensionDataLength -=
                 sizeof(typ) + sizeof(nameLength) + nameLength;
           }
+        } else if (
+            extensionType ==
+            ssl::TLSExtension::APPLICATION_LAYER_PROTOCOL_NEGOTIATION) {
+          parseClientAlpns(sock, cursor, extensionDataLength);
         } else {
           cursor.skip(extensionDataLength);
         }
@@ -2168,6 +2309,15 @@ void AsyncSSLSocket::getSSLServerCiphers(std::string& serverCiphers) const {
     serverCiphers.append(":");
     serverCiphers.append(cipher);
     i++;
+  }
+}
+
+const std::vector<std::string>& AsyncSSLSocket::getClientAlpns() const {
+  if (!parseClientHello_) {
+    static std::vector<std::string> emptyAlpns{};
+    return emptyAlpns;
+  } else {
+    return clientHelloInfo_->clientAlpns_;
   }
 }
 

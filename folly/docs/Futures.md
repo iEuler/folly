@@ -4,7 +4,7 @@
 
 # Overview
 
-Folly Futures is an async C++ framework inspired by [Twitter's Futures](https://twitter.github.io/finagle/guide/Futures.html) implementation in Scala (see also [Future.scala](https://github.com/twitter/util/blob/master/util-core/src/main/scala/com/twitter/util/Future.scala), [Promise.scala](https://github.com/twitter/util/blob/master/util-core/src/main/scala/com/twitter/util/Promise.scala), and friends), and loosely builds upon the existing but anemic Futures code found in the C++11 standard ([std::future](http://en.cppreference.com/w/cpp/thread/future)) and [boost::future](http://www.boost.org/doc/libs/1_53_0/doc/html/thread/synchronization.html#thread.synchronization.futures) (especially >= 1.53.0). Although inspired by the C++11 std::future interface, it is not a drop-in replacement because some ideas don't translate well enough to maintain API compatibility.
+Folly Futures is an async C++ framework inspired by [Twitter's Futures](https://twitter.github.io/finagle/guide/Futures.html) implementation in Scala (see also [Future.scala](https://github.com/twitter/util/blob/master/util-core/src/main/scala/com/twitter/util/Future.scala), [Promise.scala](https://github.com/twitter/util/blob/master/util-core/src/main/scala/com/twitter/util/Promise.scala), and friends), and loosely builds upon the existing but anemic Futures code found in the C++11 standard ([std::future](https://en.cppreference.com/w/cpp/thread/future)) and [boost::future](https://www.boost.org/doc/libs/1_53_0/doc/html/thread/synchronization.html#thread.synchronization.futures) (especially >= 1.53.0). Although inspired by the C++11 std::future interface, it is not a drop-in replacement because some ideas don't translate well enough to maintain API compatibility.
 
 The primary difference from std::future is that you can attach callbacks to Futures (with `thenValue` or `thenTry`), under the control of an executor to manage where work runs, which enables sequential and parallel composition of Futures for cleaner asynchronous code.
 
@@ -39,11 +39,13 @@ void foo(int x) {
 
 This would print:
 
+```
 making Promise
 Future chain made
 fulfilling Promise
 foo(42)
 Promise fulfilled
+```
 
 ## Blog Post
 
@@ -175,7 +177,7 @@ Future<Unit> fut3 = std::move(fut2)
 
 That example is a little contrived but the idea is that you can transform a result from one type to another, potentially in a chain, and unhandled errors propagate. Of course, the intermediate variables are optional.
 
-Using `.thenValue` or `.thenTry` to add callbacks is idiomatic. It brings all the code into one place, which avoids callback hell. `.thenValue` appends a continuation that takes `T&&` for some `Future<T>` and an error bypasses the callback and is passed to the next, `thenTry` takes a callback taking `folly::Try<T>` which encapsulates both value and exception. `thenError(tag_t<ExceptionType>{},...` will bypass a value and only run if there is an exception, the `ExceptionType` template parameter to the tag type allows filtering by exception type; `tag_t<ExceptionType>{}` is optional and if no tag is passed passed the function will be parameterised with a `folly::exception_wrapper`. For C++17 there is a global inline variable and `folly::tag<ExceptionType>` may be passed directly without explicit construction.
+Using `.thenValue` or `.thenTry` to add callbacks is idiomatic. It brings all the code into one place, which avoids callback hell. `.thenValue` appends a continuation that takes `T&&` for some `Future<T>` and an error bypasses the callback and is passed to the next, `thenTry` takes a callback taking `folly::Try<T>` which encapsulates both value and exception. `thenError(tag_t<ExceptionType>{},...` will bypass a value and only run if there is an exception, the `ExceptionType` template parameter to the tag type allows filtering by exception type; `tag_t<ExceptionType>{}` is optional and if no tag is passed passed the function will be parameterized with a `folly::exception_wrapper`. For C++17 there is a global inline variable and `folly::tag<ExceptionType>` may be passed directly without explicit construction.
 
 
 

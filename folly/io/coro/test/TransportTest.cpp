@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include <folly/experimental/coro/BlockingWait.h>
 #include <folly/experimental/coro/Collect.h>
 #include <folly/io/async/test/AsyncSocketTest.h>
+#include <folly/io/async/test/MockAsyncTransport.h>
 #include <folly/io/async/test/ScopedBoundPort.h>
 #include <folly/io/coro/ServerSocket.h>
 #include <folly/io/coro/Transport.h>
@@ -299,6 +300,23 @@ TEST_F(TransportTest, AcceptCancelled) {
   });
 }
 
+TEST_F(TransportTest, RequestCancellationInAnotherThread) {
+  auto ass = AsyncServerSocket::newSocket(&evb);
+  std::thread anotherThread([&] {
+    std::this_thread::sleep_for(10ms);
+    cancelSource.requestCancellation();
+  });
+
+  run([&]() -> Task<> {
+    ServerSocket css(ass, std::nullopt, 16);
+    EXPECT_THROW(
+        co_await co_withCancellation(cancelSource.getToken(), css.accept()),
+        OperationCancelled);
+  });
+
+  anotherThread.join();
+}
+
 TEST_F(TransportTest, AsyncClientAndServer) {
   run([&]() -> Task<> {
     constexpr int kSize = 128;
@@ -327,4 +345,41 @@ TEST_F(TransportTest, AsyncClientAndServer) {
   });
 }
 
+class MockTransportTest : public TransportTest {
+ public:
+  folly::coro::Task<Transport> connect() {
+    mockTransport = new testing::NiceMock<test::MockAsyncTransport>();
+    folly::AsyncTransport::UniquePtr transport(mockTransport);
+    co_return Transport(&evb, std::move(transport));
+  }
+  test::MockAsyncTransport* mockTransport;
+};
+
+TEST_F(MockTransportTest, readSuccessCanceled) {
+  run([&]() -> Task<> {
+    auto cs = co_await connect();
+    constexpr auto kBufSize = 65536;
+    std::array<uint8_t, kBufSize> rcvBuf;
+    EXPECT_CALL(*mockTransport, setReadCB(testing::_))
+        .WillOnce(testing::Invoke(
+            [](AsyncReader::ReadCallback* rcb) { rcb->readEOF(); }));
+    EXPECT_CALL(*mockTransport, setReadCB(nullptr)).Times(2);
+    folly::CancellationSource cancellationSource;
+    auto readFut =
+        co_withCancellation(
+            cancellationSource.getToken(),
+            cs.read(
+                MutableByteRange(rcvBuf.data(), rcvBuf.data() + rcvBuf.size()),
+                100ms))
+            .scheduleOn(&evb)
+            .start();
+    // Let the read coro start and get the EOF
+    co_await co_reschedule_on_current_executor;
+    // cancel
+    cancellationSource.requestCancellation();
+    // read succeeds with nRead == 0
+    auto nRead = co_await std::move(readFut);
+    EXPECT_EQ(nRead, 0);
+  });
+}
 #endif // FOLLY_HAS_COROUTINES

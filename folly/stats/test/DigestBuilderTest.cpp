@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <folly/stats/detail/DigestBuilder.h>
+#include <folly/stats/DigestBuilder.h>
 
 #include <chrono>
 #include <random>
@@ -24,7 +24,6 @@
 #include <folly/portability/GTest.h>
 
 using namespace folly;
-using namespace folly::detail;
 
 template <size_t MergeSize>
 class SimpleDigest {

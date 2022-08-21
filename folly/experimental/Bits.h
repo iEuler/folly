@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -200,14 +200,17 @@ struct Bits {
 
 template <class T, class Traits>
 inline void Bits<T, Traits>::set(T* p, size_t bit) {
+  auto mask = static_cast<UnderlyingType>(one << bitOffset(bit));
   T& block = p[blockIndex(bit)];
-  Traits::store(block, Traits::loadRMW(block) | (one << bitOffset(bit)));
+  Traits::store(block, Traits::loadRMW(block) | mask);
 }
 
 template <class T, class Traits>
 inline void Bits<T, Traits>::clear(T* p, size_t bit) {
+  auto mask = static_cast<UnderlyingType>(one << bitOffset(bit));
+  auto ksam = static_cast<UnderlyingType>(~mask);
   T& block = p[blockIndex(bit)];
-  Traits::store(block, Traits::loadRMW(block) & ~(one << bitOffset(bit)));
+  Traits::store(block, Traits::loadRMW(block) & ksam);
 }
 
 template <class T, class Traits>

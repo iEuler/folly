@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -832,8 +832,6 @@ exception_wrapper SchemaValidator::try_validate(
     if (auto se = validate(vc, value)) {
       return make_exception_wrapper<SchemaError>(*se);
     }
-  } catch (const std::exception& e) {
-    return exception_wrapper(std::current_exception(), e);
   } catch (...) {
     return exception_wrapper(std::current_exception());
   }

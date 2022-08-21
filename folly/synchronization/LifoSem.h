@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -358,12 +358,28 @@ class LifoSemHead {
 /// See LifoSemNode for more information on how to make your own.
 template <typename Handoff, template <typename> class Atom = std::atomic>
 struct LifoSemBase {
+  /// Currently unused, only for compatibility with ThrottledLifoSem.
+  struct Options {};
+
   /// Constructor
   constexpr explicit LifoSemBase(uint32_t initialValue = 0)
+      : LifoSemBase({}, initialValue) {}
+  constexpr explicit LifoSemBase(const Options&, uint32_t initialValue = 0)
       : head_(in_place, LifoSemHead::fresh(initialValue)) {}
 
   LifoSemBase(LifoSemBase const&) = delete;
   LifoSemBase& operator=(LifoSemBase const&) = delete;
+
+  /// Returns true on a successful handoff, and return false without changing
+  /// the value of the semaphore if there are no waiters
+  bool tryPost() {
+    auto idx = incrOrPop(1, true);
+    if (idx != 0) {
+      idxToNode(idx).handoff().post();
+      return true;
+    }
+    return false;
+  }
 
   /// Silently saturates if value is already 2^32-1
   bool post() {
@@ -661,7 +677,7 @@ struct LifoSemBase {
   /// Either increments by n and returns 0, or pops a node and returns it.
   /// If n + the stripe's value overflows, then the stripe's value
   /// saturates silently at 2^32-1
-  uint32_t incrOrPop(uint32_t n) {
+  uint32_t incrOrPop(uint32_t n, const bool skip_increment = false) {
     while (true) {
       assert(n > 0);
 
@@ -679,6 +695,9 @@ struct LifoSemBase {
           return head.idx();
         }
       } else {
+        if (skip_increment) {
+          return 0;
+        }
         auto after = head.withValueIncr(n);
         if (head_->compare_exchange_strong(head, after)) {
           // successful incr
@@ -741,8 +760,8 @@ struct LifoSemBase {
 
 template <template <typename> class Atom, class BatonType>
 struct LifoSemImpl : public detail::LifoSemBase<BatonType, Atom> {
-  constexpr explicit LifoSemImpl(uint32_t v = 0)
-      : detail::LifoSemBase<BatonType, Atom>(v) {}
+  using Options = typename detail::LifoSemBase<BatonType, Atom>::Options;
+  using detail::LifoSemBase<BatonType, Atom>::LifoSemBase;
 };
 
 } // namespace folly

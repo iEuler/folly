@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,13 +46,17 @@ class ScopedEventBaseThread : public IOExecutor, public SequencedExecutor {
       EventBase::Options eventBaseOptions,
       EventBaseManager* ebm,
       StringPiece name);
-  ~ScopedEventBaseThread();
+  ~ScopedEventBaseThread() override;
 
   EventBase* getEventBase() const { return &eb_; }
 
   EventBase* getEventBase() override { return &eb_; }
 
   std::thread::id getThreadId() const { return th_.get_id(); }
+
+  std::thread::native_handle_type getNativeHandle() {
+    return th_.native_handle();
+  }
 
   void add(Func func) override { getEventBase()->add(std::move(func)); }
 

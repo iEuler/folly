@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -886,8 +886,10 @@ void runPrehash() {
   auto t1 = h.prehash(s("def"));
   F14HashToken t2;
   t2 = h.prehash(s("abc"));
+  h.prefetch(t2);
   EXPECT_TRUE(h.find(t1, s("def")) == h.end());
   EXPECT_FALSE(h.find(t2, s("abc")) == h.end());
+  h.prefetch(t1);
 }
 TEST(F14ValueMap, prehash) {
   runPrehash<F14ValueMap<std::string, std::string>>();
@@ -1767,6 +1769,18 @@ void runHeterogeneousInsertTest() {
   EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts();
 #endif
+
+  const auto t = map.prehash(10);
+  resetTracking();
+  map.try_emplace_token(t, 10, 40);
+  EXPECT_TRUE(map.contains(t, 10));
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 1}), 0)
+      << Tracked<1>::counts();
+  resetTracking();
+  map.erase(map.find(t, 10));
+  EXPECT_EQ(map.size(), 0);
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts();
 }
 
 template <typename M>
@@ -2077,6 +2091,9 @@ void testContainsWithPrecomputedHash() {
   const auto otherKey{2};
   const auto hashTokenNotFound = m.prehash(otherKey);
   EXPECT_FALSE(m.contains(hashTokenNotFound, otherKey));
+
+  m.prefetch(hashToken);
+  m.prefetch(hashTokenNotFound);
 }
 
 TEST(F14Map, containsWithPrecomputedHash) {

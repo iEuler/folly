@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,11 +43,25 @@ TEST(StreamingStatsTest, Constructor) {
   EXPECT_DOUBLE_EQ(stats.maximum(), 10.0);
 }
 
+TEST(StreamingStatsTest, ConstructFromValues) {
+  StreamingStats<double> stats1;
+  for (double i = 0.0; i < 100; i++) {
+    stats1.add(i);
+  }
+
+  StreamingStats<double> stats2(stats1.state());
+  EXPECT_EQ(stats1.count(), stats2.count());
+  EXPECT_EQ(stats1.mean(), stats2.mean());
+  EXPECT_EQ(stats1.m2(), stats2.m2());
+  EXPECT_EQ(stats1.minimum(), stats2.minimum());
+  EXPECT_EQ(stats1.maximum(), stats2.maximum());
+}
+
 template <typename SampleDataType>
 class StreamingStatsTest : public testing::Test {
  public:
   void SetUp() override {
-    for (SampleDataType value = 1.0; value < 11.0; value += 1.0) {
+    for (SampleDataType value = 1; value < 11; value += 1) {
       stats.add(value);
     }
   }

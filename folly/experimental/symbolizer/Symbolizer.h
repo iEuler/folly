@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -106,7 +106,8 @@ class Symbolizer {
   explicit Symbolizer(
       ElfCacheBase* cache,
       LocationInfoMode mode = kDefaultLocationInfoMode,
-      size_t symbolCacheSize = 0);
+      size_t symbolCacheSize = 0,
+      std::string exePath = "/proc/self/exe");
 
   /**
    *  Symbolize given addresses and return the number of @frames filled:
@@ -150,12 +151,13 @@ class Symbolizer {
  private:
   ElfCacheBase* const cache_;
   const LocationInfoMode mode_;
+  const std::string exePath_;
 
   // SymbolCache contains mapping between an address and its frames. The first
   // frame is the normal function call, and the following are stacked inline
   // function calls if any.
   using CachedSymbolizedFrames =
-      std::array<SymbolizedFrame, 1 + Dwarf::kMaxInlineLocationInfoPerFrame>;
+      std::array<SymbolizedFrame, 1 + kMaxInlineLocationInfoPerFrame>;
   using SymbolCache = EvictingCacheMap<uintptr_t, CachedSymbolizedFrames>;
   folly::Optional<Synchronized<SymbolCache>> symbolCache_;
 };
@@ -241,13 +243,38 @@ class SafeStackTracePrinter {
   std::unique_ptr<FrameArray<kMaxStackTraceDepth>> addresses_;
 };
 
+#if FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
+
+/**
+ * Gets the stack trace for the current thread and returns a string
+ * representation. Convenience function meant for debugging and logging.
+ * Empty string indicates stack trace functionality is not available.
+ *
+ * NOT async-signal-safe.
+ */
+std::string getStackTraceStr();
+
 /**
  * Gets the async stack trace for the current thread and returns a string
  * representation. Convenience function meant for debugging and logging.
+ * Empty string indicates stack trace functionality is not available.
  *
  * NOT async-signal-safe.
  */
 std::string getAsyncStackTraceStr();
+
+#else
+// Define these in the header, as headers are always available, but not all
+// platforms can link against the symbolizer library cpp sources.
+
+inline std::string getStackTraceStr() {
+  return "";
+}
+
+inline std::string getAsyncStackTraceStr() {
+  return "";
+}
+#endif // FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
 
 #if FOLLY_HAVE_SWAPCONTEXT
 

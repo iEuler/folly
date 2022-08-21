@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -105,7 +105,7 @@ TEST(Window, basic) {
                 5UL,
                 [](size_t iteration) { return folly::makeFuture(iteration); },
                 2),
-            0UL,
+            size_t{0},
             [](size_t sum, const Try<size_t>& b) { return sum + b.value(); })
             .get();
     EXPECT_EQ(0 + 1 + 2 + 3 + 4, res);

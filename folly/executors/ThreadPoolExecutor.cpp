@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,11 @@
 
 #include <folly/executors/ThreadPoolExecutor.h>
 
+#include <ctime>
+
 #include <folly/executors/GlobalThreadPoolList.h>
-#include <folly/synchronization/AsymmetricMemoryBarrier.h>
+#include <folly/portability/PThread.h>
+#include <folly/synchronization/AsymmetricThreadFence.h>
 #include <folly/tracing/StaticTracepoint.h>
 
 namespace folly {
@@ -40,7 +43,7 @@ void ThreadPoolExecutor::deregisterThreadPoolExecutor(ThreadPoolExecutor* tpe) {
   });
 }
 
-DEFINE_int64(
+FOLLY_GFLAGS_DEFINE_int64(
     threadtimeout_ms,
     60000,
     "Idle time before ThreadPoolExecutor threads are joined");
@@ -48,14 +51,12 @@ DEFINE_int64(
 ThreadPoolExecutor::ThreadPoolExecutor(
     size_t /* maxThreads */,
     size_t minThreads,
-    std::shared_ptr<ThreadFactory> threadFactory,
-    bool isWaitForAll)
+    std::shared_ptr<ThreadFactory> threadFactory)
     : threadFactory_(std::move(threadFactory)),
-      isWaitForAll_(isWaitForAll),
       taskStatsCallbacks_(std::make_shared<TaskStatsCallbackRegistry>()),
       threadPoolHook_("folly::ThreadPoolExecutor"),
-      minThreads_(minThreads),
-      threadTimeout_(FLAGS_threadtimeout_ms) {
+      minThreads_(minThreads) {
+  threadTimeout_ = std::chrono::milliseconds(FLAGS_threadtimeout_ms);
   namePrefix_ = getNameHelper();
 }
 
@@ -73,23 +74,6 @@ ThreadPoolExecutor::Task::Task(
   // Assume that the task in enqueued on creation
   enqueueTime_ = std::chrono::steady_clock::now();
 }
-
-namespace {
-
-template <class F>
-void nothrow(const char* name, F&& f) {
-  try {
-    f();
-  } catch (const std::exception& e) {
-    LOG(ERROR) << "ThreadPoolExecutor: " << name << " threw unhandled "
-               << typeid(e).name() << " exception: " << e.what();
-  } catch (...) {
-    LOG(ERROR) << "ThreadPoolExecutor: " << name
-               << " threw unhandled non-exception object";
-  }
-}
-
-} // namespace
 
 void ThreadPoolExecutor::runTask(const ThreadPtr& thread, Task&& task) {
   thread->idle.store(false, std::memory_order_relaxed);
@@ -202,12 +186,9 @@ void ThreadPoolExecutor::setNumThreads(size_t numThreads) {
     }
     if (active > numThreads) {
       numThreadsToJoin = active - numThreads;
-      if (numThreadsToJoin > active - minthreads) {
-        numThreadsToJoin = active - minthreads;
-      }
+      assert(numThreadsToJoin <= active - minthreads);
       ThreadPoolExecutor::removeThreads(numThreadsToJoin, false);
-      activeThreads_.store(
-          active - numThreadsToJoin, std::memory_order_relaxed);
+      activeThreads_.store(numThreads, std::memory_order_relaxed);
     } else if (pending > 0 || !observers_.empty() || active < minthreads) {
       size_t numToAdd = std::min(pending, numThreads - active);
       if (!observers_.empty()) {
@@ -349,6 +330,20 @@ std::string ThreadPoolExecutor::getNameHelper() const {
 
 std::atomic<uint64_t> ThreadPoolExecutor::Thread::nextId(0);
 
+std::chrono::nanoseconds ThreadPoolExecutor::Thread::usedCpuTime() const {
+  using std::chrono::nanoseconds;
+  using std::chrono::seconds;
+  timespec tp{};
+#ifdef __linux__
+  clockid_t clockid;
+  auto th = const_cast<std::thread&>(handle).native_handle();
+  if (!pthread_getcpuclockid(th, &clockid)) {
+    clock_gettime(clockid, &tp);
+  }
+#endif
+  return nanoseconds(tp.tv_nsec) + seconds(tp.tv_sec);
+}
+
 void ThreadPoolExecutor::subscribeToTaskStats(TaskStatsCallback cb) {
   if (*taskStatsCallbacks_->inCallback) {
     throw std::runtime_error("cannot subscribe in task stats callback");
@@ -408,10 +403,7 @@ void ThreadPoolExecutor::addObserver(std::shared_ptr<Observer> o) {
       o->threadPreviouslyStarted(thread.get());
     }
   }
-  while (activeThreads_.load(std::memory_order_relaxed) <
-         maxThreads_.load(std::memory_order_relaxed)) {
-    ensureActiveThreads();
-  }
+  ensureMaxActiveThreads();
 }
 
 void ThreadPoolExecutor::removeObserver(std::shared_ptr<Observer> o) {
@@ -461,7 +453,7 @@ bool ThreadPoolExecutor::tryTimeoutThread() {
   // queues have seq_cst ordering, some do not, so add an explicit
   // barrier.  tryTimeoutThread is the slow path and only happens once
   // every thread timeout; use asymmetric barrier to keep add() fast.
-  asymmetricHeavyBarrier();
+  asymmetric_thread_fence_heavy(std::memory_order_seq_cst);
 
   // If this is based on idle thread timeout, then
   // adjust vars appropriately (otherwise stop() or join()
@@ -490,7 +482,7 @@ void ThreadPoolExecutor::ensureActiveThreads() {
 
   // Matches barrier in tryTimeoutThread().  Ensure task added
   // is seen before loading activeThreads_ below.
-  asymmetricLightBarrier();
+  asymmetric_thread_fence_light(std::memory_order_seq_cst);
 
   // Fast path assuming we are already at max threads.
   auto active = activeThreads_.load(std::memory_order_relaxed);
@@ -509,6 +501,13 @@ void ThreadPoolExecutor::ensureActiveThreads() {
   }
   ThreadPoolExecutor::addThreads(1);
   activeThreads_.store(active + 1, std::memory_order_relaxed);
+}
+
+void ThreadPoolExecutor::ensureMaxActiveThreads() {
+  while (activeThreads_.load(std::memory_order_relaxed) <
+         maxThreads_.load(std::memory_order_relaxed)) {
+    ensureActiveThreads();
+  }
 }
 
 // If an idle thread times out, only join it if there are at least

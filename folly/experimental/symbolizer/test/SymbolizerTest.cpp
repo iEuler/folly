@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,13 @@
 
 #include <folly/experimental/symbolizer/Symbolizer.h>
 
+#include <signal.h>
 #include <array>
 #include <cstdlib>
 
 #include <folly/Demangle.h>
 #include <folly/Range.h>
+#include <folly/ScopeGuard.h>
 #include <folly/String.h>
 #include <folly/experimental/symbolizer/ElfCache.h>
 #include <folly/experimental/symbolizer/SymbolizedFrame.h>
@@ -28,6 +30,8 @@
 #include <folly/experimental/symbolizer/test/SymbolizerTestUtils.h>
 #include <folly/portability/Filesystem.h>
 #include <folly/portability/GTest.h>
+#include <folly/portability/Unistd.h>
+#include <folly/synchronization/Baton.h>
 #include <folly/test/TestUtils.h>
 
 #if FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
@@ -36,12 +40,21 @@ namespace folly {
 namespace symbolizer {
 namespace test {
 
+#define SCOPED_TRACE_FRAMES(frames) \
+  SCOPED_TRACE([&] {                \
+    StringSymbolizePrinter printer; \
+    printer.println(frames);        \
+    return printer.str();           \
+  }())
+
 void foo() {}
 
 FOLLY_NOINLINE void bar() {
   std::array<int, 2> a = {{1, 2}};
-  // Use qsort, which is in a different library
-  qsort(a.data(), 2, sizeof(int), testComparator);
+  // Use lfind, which is in a different library
+  int key = 1;
+  unsigned long nmemb = 2;
+  lfind(&key, a.data(), &nmemb, sizeof(int), testComparator);
 }
 
 TEST(Symbolizer, Single) {
@@ -62,6 +75,47 @@ TEST(Symbolizer, Single) {
     basename.advance(pos + 1);
   }
   EXPECT_EQ("SymbolizerTest.cpp", basename.str());
+}
+
+TEST(Symbolizer, SingleCustomExePath) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
+  auto pid = ::fork();
+  if (pid == -1) {
+    SKIP("fork failed");
+  } else if (pid == 0) {
+    // child process waits forever, parent will kill
+    folly::Baton<> baton;
+    baton.wait();
+  } else {
+    // parent process
+
+    // kill the child process on cleanup
+    auto guard = folly::makeGuard([pid] {
+      auto error = ::kill(pid, SIGKILL);
+      ASSERT_EQ(0, error);
+    });
+
+    // path to executable for child binary
+    auto exePath = folly::to<std::string>("/proc/", pid, "/exe");
+
+    // It looks like we could only use .debug_aranges with "-g2", with
+    // "-g1 -gdwarf-aranges", the code has to fallback to line-tables to
+    // get the file name.
+    Symbolizer symbolizer(
+        nullptr, LocationInfoMode::FULL, 0, std::move(exePath));
+    SymbolizedFrame a;
+    ASSERT_TRUE(symbolizer.symbolize(reinterpret_cast<uintptr_t>(foo), a));
+    EXPECT_EQ("folly::symbolizer::test::foo()", folly::demangle(a.name));
+
+    auto path = a.location.file.toString();
+    folly::StringPiece basename(path);
+    auto pos = basename.rfind('/');
+    if (pos != folly::StringPiece::npos) {
+      basename.advance(pos + 1);
+    }
+    EXPECT_EQ("SymbolizerTest.cpp", basename.str());
+  }
 }
 
 // Test stack frames...
@@ -93,6 +147,8 @@ void runElfCacheTest(Symbolizer& symbolizer) {
     frames.frames[i].clear();
   }
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
   ASSERT_LE(4, frames.frameCount);
   for (size_t i = 1; i < 4; ++i) {
     EXPECT_STREQ(goldenFrames.frames[i].name, frames.frames[i].name);
@@ -125,12 +181,15 @@ TEST(SymbolizerTest, SymbolCache) {
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
   bar();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
 
   FrameArray<100> frames2;
   gComparatorGetStackTraceArg = &frames2;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
   bar();
   symbolizer.symbolize(frames2);
+  SCOPED_TRACE_FRAMES(frames2);
+
   for (size_t i = 0; i < frames.frameCount; i++) {
     EXPECT_STREQ(frames.frames[i].name, frames2.frames[i].name);
   }
@@ -151,9 +210,12 @@ void expectFrameEq(
   auto demangled = folly::demangle(frame.name);
   EXPECT_TRUE(demangled == shortName || demangled == fullName)
       << "Found: demangled=" << demangled
-      << " expecting shortName=" << shortName << " or fullName=" << fullName;
+      << " expecting shortName=" << shortName << " or fullName=" << fullName
+      << " address: " << frame.addr << " hex(address): " << std::hex
+      << frame.addr;
   EXPECT_EQ(normalizePath(frame.location.file.toString()), normalizePath(file))
-      << ' ' << fullName;
+      << ' ' << fullName << " address: " << frame.addr
+      << " hex(address): " << std::hex << frame.addr;
   EXPECT_EQ(frame.location.line, lineno) << ' ' << fullName;
 }
 
@@ -177,35 +239,36 @@ TEST(SymbolizerTest, InlineFunctionBasic) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
+      "inlineB_inlineA_lfind",
+      "folly::symbolizer::test::inlineB_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "inlineB_inlineA_qsort",
-      "folly::symbolizer::test::inlineB_inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 
   FrameArray<100> frames2;
   gComparatorGetStackTraceArg = &frames2;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames2);
 
   expectFramesEq(frames, frames2);
 }
 
-FOLLY_NOINLINE void call_B_A_qsort() {
-  kLineno_inlineB_inlineA_qsort = __LINE__ + 1;
-  inlineB_inlineA_qsort();
+FOLLY_NOINLINE void call_B_A_lfind() {
+  kLineno_inlineB_inlineA_lfind = __LINE__ + 1;
+  inlineB_inlineA_lfind();
 }
 
 TEST(SymbolizerTest, InlineFunctionWithoutEnoughFrames) {
@@ -216,28 +279,29 @@ TEST(SymbolizerTest, InlineFunctionWithoutEnoughFrames) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_B_A_qsort();
+  call_B_A_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
 
   std::array<SymbolizedFrame, 2> limitedFrames;
 
-  // The address of the line where call_B_A_qsort calls inlineB_inlineA_qsort.
+  // The address of the line where call_B_A_lfind calls inlineB_inlineA_lfind.
   symbolizer.symbolize(
-      folly::Range<const uintptr_t*>(&frames.addresses[5], 1),
+      folly::Range<const uintptr_t*>(&frames.addresses[4], 1),
       folly::range(limitedFrames));
 
   expectFrameEq(
       limitedFrames[0],
-      "inlineB_inlineA_qsort",
-      "folly::symbolizer::test::inlineB_inlineA_qsort()",
+      "inlineB_inlineA_lfind",
+      "folly::symbolizer::test::inlineB_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
   expectFrameEq(
       limitedFrames[1],
-      "call_B_A_qsort",
-      "folly::symbolizer::test::call_B_A_qsort()",
+      "call_B_A_lfind",
+      "folly::symbolizer::test::call_B_A_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTest.cpp",
-      kLineno_inlineB_inlineA_qsort);
+      kLineno_inlineB_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, InlineFunctionInLexicalBlock) {
@@ -248,29 +312,30 @@ TEST(SymbolizerTest, InlineFunctionInLexicalBlock) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_lexicalBlock_inlineB_inlineA_qsort();
+  call_lexicalBlock_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
+      "inlineB_inlineA_lfind",
+      "folly::symbolizer::test::inlineB_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
+      kLineno_inlineA_lfind);
 
   expectFrameEq(
       frames.frames[6],
-      "inlineB_inlineA_qsort",
-      "folly::symbolizer::test::inlineB_inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
-
-  expectFrameEq(
-      frames.frames[7],
-      "lexicalBlock_inlineB_inlineA_qsort",
-      "folly::symbolizer::test::lexicalBlock_inlineB_inlineA_qsort()",
+      "lexicalBlock_inlineB_inlineA_lfind",
+      "folly::symbolizer::test::lexicalBlock_inlineB_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils.cpp",
-      kLineno_inlineB_inlineA_qsort);
+      kLineno_inlineB_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, InlineFunctionInDifferentCompilationUnit) {
@@ -281,16 +346,17 @@ TEST(SymbolizerTest, InlineFunctionInDifferentCompilationUnit) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  // NOTE: inlineLTO_inlineA_qsort is only inlined with LTO/ThinLTO.
-  call_inlineLTO_inlineA_qsort();
+  // NOTE: inlineLTO_inlineA_lfind is only inlined with LTO/ThinLTO.
+  call_inlineLTO_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
 
   expectFrameEq(
-      frames.frames[6],
-      "inlineLTO_inlineA_qsort",
-      "folly::symbolizer::test::inlineLTO_inlineA_qsort()",
+      frames.frames[5],
+      "inlineLTO_inlineA_lfind",
+      "folly::symbolizer::test::inlineLTO_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils.cpp",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, InlineClassMemberFunctionSameFile) {
@@ -301,22 +367,23 @@ TEST(SymbolizerTest, InlineClassMemberFunctionSameFile) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_same_file_memberInline_inlineA_qsort();
+  call_same_file_memberInline_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "memberInline_inlineA_qsort",
-      "folly::symbolizer::test::ClassSameFile::memberInline_inlineA_qsort() const",
+      "memberInline_inlineA_lfind",
+      "folly::symbolizer::test::ClassSameFile::memberInline_inlineA_lfind() const",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils.cpp",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, StaticInlineClassMemberFunctionSameFile) {
@@ -327,22 +394,23 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunctionSameFile) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_same_file_staticMemberInline_inlineA_qsort();
+  call_same_file_staticMemberInline_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "staticMemberInline_inlineA_qsort",
-      "folly::symbolizer::test::ClassSameFile::staticMemberInline_inlineA_qsort()",
+      "staticMemberInline_inlineA_lfind",
+      "folly::symbolizer::test::ClassSameFile::staticMemberInline_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils.cpp",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, InlineClassMemberFunctionInDifferentFile) {
@@ -353,22 +421,23 @@ TEST(SymbolizerTest, InlineClassMemberFunctionInDifferentFile) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_different_file_memberInline_inlineA_qsort();
+  call_different_file_memberInline_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
+      "memberInline_inlineA_lfind",
+      "folly::symbolizer::test::ClassDifferentFile::memberInline_inlineA_lfind() const",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "memberInline_inlineA_qsort",
-      "folly::symbolizer::test::ClassDifferentFile::memberInline_inlineA_qsort() const",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 }
 
 TEST(SymbolizerTest, StaticInlineClassMemberFunctionInDifferentFile) {
@@ -379,41 +448,44 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunctionInDifferentFile) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_different_file_staticMemberInline_inlineA_qsort();
+  call_different_file_staticMemberInline_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
+      "staticMemberInline_inlineA_lfind",
+      "folly::symbolizer::test::ClassDifferentFile::staticMemberInline_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "staticMemberInline_inlineA_qsort",
-      "folly::symbolizer::test::ClassDifferentFile::staticMemberInline_inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 }
 
 // No inline frames should be filled because of no extra frames.
-TEST(SymbolizerTest, InlineFunctionBasicNoExtraFrames) {
+TEST(SymbolizerTest, InlineFunctionNoExtraFrames) {
   SKIP_IF(!Symbolizer::isAvailable());
 
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 100);
   FrameArray<9> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<9>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
 
   Symbolizer symbolizer2(nullptr, LocationInfoMode::FULL, 100);
   FrameArray<9> frames2;
   gComparatorGetStackTraceArg = &frames2;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<9>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer2.symbolize(frames2);
+  SCOPED_TRACE_FRAMES(frames2);
 
   expectFramesEq<9>(frames, frames2);
 }
@@ -426,27 +498,28 @@ TEST(SymbolizerTest, InlineFunctionWithCache) {
   FrameArray<100> frames;
   gComparatorGetStackTraceArg = &frames;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames);
+  SCOPED_TRACE_FRAMES(frames);
+
+  expectFrameEq(
+      frames.frames[4],
+      "inlineA_lfind",
+      "folly::symbolizer::test::inlineA_lfind()",
+      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
+      kLineno_lfind);
 
   expectFrameEq(
       frames.frames[5],
-      "inlineA_qsort",
-      "folly::symbolizer::test::inlineA_qsort()",
+      "inlineB_inlineA_lfind",
+      "folly::symbolizer::test::inlineB_inlineA_lfind()",
       "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_qsort);
-
-  expectFrameEq(
-      frames.frames[6],
-      "inlineB_inlineA_qsort",
-      "folly::symbolizer::test::inlineB_inlineA_qsort()",
-      "folly/experimental/symbolizer/test/SymbolizerTestUtils-inl.h",
-      kLineno_inlineA_qsort);
+      kLineno_inlineA_lfind);
 
   FrameArray<100> frames2;
   gComparatorGetStackTraceArg = &frames2;
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
-  call_inlineB_inlineA_qsort();
+  call_inlineB_inlineA_lfind();
   symbolizer.symbolize(frames2);
   expectFramesEq(frames, frames2);
 }
@@ -458,13 +531,15 @@ int64_t functionWithTwoParameters(size_t a, int32_t b) {
 TEST(Dwarf, FindParameterNames) {
   SKIP_IF(!Symbolizer::isAvailable());
 
+  ElfCache elfCache;
+
   auto address = reinterpret_cast<uintptr_t>(functionWithTwoParameters);
   Symbolizer symbolizer;
   SymbolizedFrame frame;
   ASSERT_TRUE(symbolizer.symbolize(address, frame));
 
   std::vector<folly::StringPiece> names;
-  Dwarf dwarf(frame.file.get());
+  Dwarf dwarf(&elfCache, frame.file.get());
   LocationInfo info;
   folly::Range<SymbolizedFrame*> extraInlineFrames = {};
   dwarf.findAddress(
@@ -474,10 +549,18 @@ TEST(Dwarf, FindParameterNames) {
       extraInlineFrames,
       [&](const folly::StringPiece name) { names.push_back(name); });
 
+  if (names.empty()) {
+    // When using -fsplit-dwarf-inlining info about parameters will not be
+    // emitted for the inlined debug info.
+    return;
+  }
+
   ASSERT_EQ(2, names.size());
   ASSERT_EQ("a", names[0]);
   ASSERT_EQ("b", names[1]);
 }
+
+#undef SCOPED_TRACE_FRAMES
 
 } // namespace test
 } // namespace symbolizer

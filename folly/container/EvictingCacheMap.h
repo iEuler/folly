@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -278,13 +278,6 @@ class EvictingCacheMap {
 
   template <typename K, EnableHeterogeneousFind<K, int> = 0>
   iterator find(const K& key) {
-    return findImpl(*this, key);
-  }
-
-  const_iterator find(const TKey& key) const { return findImpl(*this, key); }
-
-  template <typename K, EnableHeterogeneousFind<K, int> = 0>
-  const_iterator find(const K& key) const {
     return findImpl(*this, key);
   }
 

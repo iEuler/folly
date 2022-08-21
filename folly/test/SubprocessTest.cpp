@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -348,6 +348,27 @@ TEST(SimpleSubprocessTest, DetachExecFails) {
       "/no/such/file");
 }
 
+TEST(SimpleSubprocessTest, Affinity) {
+#ifdef __linux__
+  cpu_set_t cpuSet0;
+  CPU_ZERO(&cpuSet0);
+  CPU_SET(1, &cpuSet0);
+  CPU_SET(2, &cpuSet0);
+  CPU_SET(3, &cpuSet0);
+  Subprocess::Options options;
+  Subprocess proc(
+      std::vector<std::string>{"/bin/sleep", "5"}, options.setCpuSet(cpuSet0));
+  EXPECT_NE(proc.pid(), -1);
+  cpu_set_t cpuSet1;
+  CPU_ZERO(&cpuSet1);
+  auto ret = ::sched_getaffinity(proc.pid(), sizeof(cpu_set_t), &cpuSet1);
+  CHECK_EQ(ret, 0);
+  CHECK_EQ(::memcmp(&cpuSet0, &cpuSet1, sizeof(cpu_set_t)), 0);
+  auto retCode = proc.waitOrTerminateOrKill(1s, 1s);
+  EXPECT_TRUE(retCode.killed());
+#endif // __linux__
+}
+
 TEST(SimpleSubprocessTest, FromExistingProcess) {
   // Manually fork a child process using fork() without exec(), and test waiting
   // for it using the Subprocess API in the parent process.
@@ -368,16 +389,9 @@ TEST(SimpleSubprocessTest, FromExistingProcess) {
 }
 
 TEST(ParentDeathSubprocessTest, ParentDeathSignal) {
-  // Find out where we are.
-  const auto basename = "subprocess_test_parent_death_helper";
-  auto helper = fs::executable_path();
-  helper.remove_filename() /= basename;
-  if (!fs::exists(helper)) {
-    helper = helper.parent_path().parent_path() / basename / basename;
-  }
-
+  auto helper = folly::test::find_resource(
+      "folly/test/subprocess_test_parent_death_helper");
   fs::path tempFile(fs::temp_directory_path() / fs::unique_path());
-
   std::vector<std::string> args{helper.string(), tempFile.string()};
   Subprocess proc(args);
   // The helper gets killed by its child, see details in
@@ -692,4 +706,51 @@ TEST(CommunicateSubprocessTest, TakeOwnershipOfPipes) {
   EXPECT_EQ(2, readFull(pipes[0].pipe.fd(), buf, 10));
   buf[2] = 0;
   EXPECT_EQ("3\n", std::string(buf));
+}
+
+TEST(CommunicateSubprocessTest, RedirectStdioToDevNull) {
+  std::vector<std::string> cmd({
+      "stat",
+      "-Lc",
+      "%t:%T",
+      "/dev/null",
+      "/dev/stdin",
+      "/dev/stderr",
+  });
+  auto options = Subprocess::Options()
+                     .pipeStdout()
+                     .stdinFd(folly::Subprocess::DEV_NULL)
+                     .stderrFd(folly::Subprocess::DEV_NULL)
+                     .usePath();
+  Subprocess proc(cmd, options);
+  auto out = proc.communicateIOBuf();
+
+  fbstring stdoutStr;
+  if (out.first.front()) {
+    stdoutStr = out.first.move()->moveToFbString();
+  }
+  LOG(ERROR) << stdoutStr;
+  std::vector<StringPiece> stdoutLines;
+  split('\n', stdoutStr, stdoutLines);
+
+  // 3 lines + empty string due to trailing newline
+  EXPECT_EQ(stdoutLines.size(), 4);
+  EXPECT_EQ(stdoutLines[0], stdoutLines[1]);
+  EXPECT_EQ(stdoutLines[0], stdoutLines[2]);
+
+  EXPECT_EQ(0, proc.wait().exitStatus());
+}
+
+TEST(CloseOtherDescriptorsSubprocessTest, ClosesFileDescriptors) {
+  // Open another filedescriptor and check to make sure that it is not opened in
+  // child process
+  int fd = ::open("/", O_RDONLY);
+  auto guard = makeGuard([fd] { ::close(fd); });
+  auto options = Subprocess::Options().closeOtherFds().pipeStdout();
+  Subprocess proc(
+      std::vector<std::string>{"/bin/ls", "/proc/self/fd"}, options);
+  auto p = proc.communicate();
+  // stdin, stdout, stderr, and /proc/self/fd should be fds [0,3] in the child
+  EXPECT_EQ("0\n1\n2\n3\n", p.first);
+  proc.wait();
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@
 
 #include <glog/logging.h>
 
-#include <folly/BenchmarkUtil.h>
 #include <folly/Likely.h>
+#include <folly/lang/Hint.h>
 
 #if defined(__linux__)
 #define FOLLY_ASYNC_STACK_ROOT_USE_PTHREAD 1
@@ -62,10 +62,6 @@ static void ensureAsyncRootTlsKeyIsInitialised() noexcept {
           << result << ")";
       std::terminate();
     }
-
-    VLOG(2) << "Initialising folly_async_stack_root_tls_key at address "
-            << (void*)(&folly_async_stack_root_tls_key)
-            << " with pthread_key_t " << folly_async_stack_root_tls_key;
   });
 }
 
@@ -146,7 +142,7 @@ FOLLY_NOINLINE static void* detached_task() noexcept {
 
   // Add this after the call to prevent the compiler from
   // turning the call to get_return_address() into a tailcall.
-  folly::doNotOptimizeAway(p);
+  compiler_must_not_elide(p);
 
   return p;
 }

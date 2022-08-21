@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,13 +33,6 @@ class ExecutionObserver {
    * @param id Unique id for the task which is starting.
    */
   virtual void starting(uintptr_t id) noexcept = 0;
-
-  /**
-   * Called when a task is ready to run.
-   *
-   * @param id Unique id for the task which is ready to run.
-   */
-  virtual void runnable(uintptr_t id) noexcept = 0;
 
   /**
    * Called just after a task stops executing.

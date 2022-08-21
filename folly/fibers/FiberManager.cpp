@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,46 +28,11 @@
 
 #include <folly/ConstexprMath.h>
 #include <folly/SingletonThreadLocal.h>
+#include <folly/memory/SanitizeAddress.h>
 #include <folly/portability/Config.h>
 #include <folly/portability/SysSyscall.h>
 #include <folly/portability/Unistd.h>
 #include <folly/synchronization/SanitizeThread.h>
-
-#ifdef FOLLY_SANITIZE_ADDRESS
-
-#ifndef _WIN32
-#include <dlfcn.h>
-#endif
-
-static void __sanitizer_start_switch_fiber_weak(
-    void** fake_stack_save,
-    void const* fiber_stack_base,
-    size_t fiber_stack_extent)
-    __attribute__((__weakref__("__sanitizer_start_switch_fiber")));
-static void __sanitizer_finish_switch_fiber_weak(
-    void* fake_stack_save,
-    void const** old_stack_base,
-    size_t* old_stack_extent)
-    __attribute__((__weakref__("__sanitizer_finish_switch_fiber")));
-static void __asan_unpoison_memory_region_weak(
-    void const /* nolint */ volatile* addr, size_t size)
-    __attribute__((__weakref__("__asan_unpoison_memory_region")));
-
-typedef void (*AsanStartSwitchStackFuncPtr)(void**, void const*, size_t);
-typedef void (*AsanFinishSwitchStackFuncPtr)(void*, void const**, size_t*);
-typedef void (*AsanUnpoisonMemoryRegionFuncPtr)(
-    void const /* nolint */ volatile*, size_t);
-
-namespace folly {
-namespace fibers {
-
-static AsanStartSwitchStackFuncPtr getStartSwitchStackFunc();
-static AsanFinishSwitchStackFuncPtr getFinishSwitchStackFunc();
-static AsanUnpoisonMemoryRegionFuncPtr getUnpoisonMemoryRegionFunc();
-} // namespace fibers
-} // namespace folly
-
-#endif
 
 namespace std {
 template <>
@@ -80,6 +45,12 @@ struct hash<folly::fibers::FiberManager::Options> {
 
 namespace folly {
 namespace fibers {
+
+void FiberManager::defaultExceptionCallback(
+    const std::exception_ptr& eptr, StringPiece context) {
+  LOG(DFATAL) << "Exception thrown in FiberManager with context '" << context
+              << "': " << exceptionStr(eptr);
+}
 
 auto FiberManager::FrozenOptions::create(const Options& options) -> ssize_t {
   return std::hash<Options>()(options);
@@ -114,8 +85,9 @@ const LoopController& FiberManager::loopController() const {
 }
 
 bool FiberManager::hasTasks() const {
-  return fibersActive_ > 0 || !remoteReadyQueue_.empty() ||
-      !remoteTaskQueue_.empty() || remoteCount_ > 0;
+  return fibersActive_.load(std::memory_order_relaxed) > 0 ||
+      !remoteReadyQueue_.empty() || !remoteTaskQueue_.empty() ||
+      remoteCount_ > 0;
 }
 
 bool FiberManager::isRemoteScheduled() const {
@@ -141,8 +113,9 @@ Fiber* FiberManager::getFiber() {
     fibersPoolSize_.store(fibersPoolSize - 1, std::memory_order_relaxed);
   }
   assert(fiber);
-  if (++fibersActive_ > maxFibersActiveLastPeriod_) {
-    maxFibersActiveLastPeriod_ = fibersActive_;
+  auto active = 1 + fibersActive_.fetch_add(1, std::memory_order_relaxed);
+  if (active > maxFibersActiveLastPeriod_) {
+    maxFibersActiveLastPeriod_ = active;
   }
   ++fiberId_;
   bool recordStack = (options_.recordStackEvery != 0) &&
@@ -169,9 +142,6 @@ size_t FiberManager::stackHighWatermark() const {
 }
 
 void FiberManager::remoteReadyInsert(Fiber* fiber) {
-  if (observer_) {
-    observer_->runnable(reinterpret_cast<uintptr_t>(fiber));
-  }
   if (remoteReadyQueue_.insertHead(fiber)) {
     loopController_->scheduleThreadSafe();
   }
@@ -205,7 +175,7 @@ void FiberManager::doFibersPoolResizing() {
     fibersAllocated_.store(fibersAllocated - 1, std::memory_order_relaxed);
   }
 
-  maxFibersActiveLastPeriod_ = fibersActive_;
+  maxFibersActiveLastPeriod_ = fibersActive_.load(std::memory_order_relaxed);
 }
 
 void FiberManager::FibersPoolResizer::run() {
@@ -219,122 +189,30 @@ void FiberManager::FibersPoolResizer::run() {
   }
 }
 
-#ifdef FOLLY_SANITIZE_ADDRESS
-
 void FiberManager::registerStartSwitchStackWithAsan(
     void** saveFakeStack, const void* stackBottom, size_t stackSize) {
-  // Check if we can find a fiber enter function and call it if we find one
-  static AsanStartSwitchStackFuncPtr fn = getStartSwitchStackFunc();
-  if (fn == nullptr) {
-    LOG(FATAL) << "The version of ASAN in use doesn't support fibers";
-  } else {
-    fn(saveFakeStack, stackBottom, stackSize);
-  }
+  sanitizer_start_switch_fiber(saveFakeStack, stackBottom, stackSize);
 }
 
 void FiberManager::registerFinishSwitchStackWithAsan(
     void* saveFakeStack, const void** saveStackBottom, size_t* saveStackSize) {
-  // Check if we can find a fiber exit function and call it if we find one
-  static AsanFinishSwitchStackFuncPtr fn = getFinishSwitchStackFunc();
-  if (fn == nullptr) {
-    LOG(FATAL) << "The version of ASAN in use doesn't support fibers";
-  } else {
-    fn(saveFakeStack, saveStackBottom, saveStackSize);
-  }
+  sanitizer_finish_switch_fiber(saveFakeStack, saveStackBottom, saveStackSize);
 }
 
 void FiberManager::freeFakeStack(void* fakeStack) {
-  static AsanStartSwitchStackFuncPtr fnStart = getStartSwitchStackFunc();
-  static AsanFinishSwitchStackFuncPtr fnFinish = getFinishSwitchStackFunc();
-  if (fnStart == nullptr || fnFinish == nullptr) {
-    LOG(FATAL) << "The version of ASAN in use doesn't support fibers";
-  }
-
   void* saveFakeStack;
   const void* stackBottom;
   size_t stackSize;
-  fnStart(&saveFakeStack, nullptr, 0);
-  fnFinish(fakeStack, &stackBottom, &stackSize);
-  fnStart(nullptr, stackBottom, stackSize);
-  fnFinish(saveFakeStack, nullptr, nullptr);
+  sanitizer_start_switch_fiber(&saveFakeStack, nullptr, 0);
+  sanitizer_finish_switch_fiber(fakeStack, &stackBottom, &stackSize);
+  sanitizer_start_switch_fiber(nullptr, stackBottom, stackSize);
+  sanitizer_finish_switch_fiber(saveFakeStack, nullptr, nullptr);
 }
 
 void FiberManager::unpoisonFiberStack(const Fiber* fiber) {
   auto stack = fiber->getStack();
-
-  // Check if we can find a fiber enter function and call it if we find one
-  static AsanUnpoisonMemoryRegionFuncPtr fn = getUnpoisonMemoryRegionFunc();
-  if (fn == nullptr) {
-    LOG(FATAL) << "This version of ASAN doesn't support memory unpoisoning";
-  } else {
-    fn(stack.first, stack.second);
-  }
+  asan_unpoison_memory_region(stack.first, stack.second);
 }
-
-static AsanStartSwitchStackFuncPtr getStartSwitchStackFunc() {
-  AsanStartSwitchStackFuncPtr fn{nullptr};
-
-  // Check whether weak reference points to statically linked enter function
-  if (nullptr != (fn = &::__sanitizer_start_switch_fiber_weak)) {
-    return fn;
-  }
-
-  // Check whether we can find a dynamically linked enter function
-#ifndef _WIN32
-  if (nullptr !=
-      (fn = (AsanStartSwitchStackFuncPtr)dlsym(
-           RTLD_DEFAULT, "__sanitizer_start_switch_fiber"))) {
-    return fn;
-  }
-#endif
-
-  // Couldn't find the function at all
-  return nullptr;
-}
-
-static AsanFinishSwitchStackFuncPtr getFinishSwitchStackFunc() {
-  AsanFinishSwitchStackFuncPtr fn{nullptr};
-
-  // Check whether weak reference points to statically linked exit function
-  if (nullptr != (fn = &::__sanitizer_finish_switch_fiber_weak)) {
-    return fn;
-  }
-
-  // Check whether we can find a dynamically linked exit function
-#ifndef _WIN32
-  if (nullptr !=
-      (fn = (AsanFinishSwitchStackFuncPtr)dlsym(
-           RTLD_DEFAULT, "__sanitizer_finish_switch_fiber"))) {
-    return fn;
-  }
-#endif
-
-  // Couldn't find the function at all
-  return nullptr;
-}
-
-static AsanUnpoisonMemoryRegionFuncPtr getUnpoisonMemoryRegionFunc() {
-  AsanUnpoisonMemoryRegionFuncPtr fn{nullptr};
-
-  // Check whether weak reference points to statically linked unpoison function
-  if (nullptr != (fn = &::__asan_unpoison_memory_region_weak)) {
-    return fn;
-  }
-
-  // Check whether we can find a dynamically linked unpoison function
-#ifndef _WIN32
-  if (nullptr !=
-      (fn = (AsanUnpoisonMemoryRegionFuncPtr)dlsym(
-           RTLD_DEFAULT, "__asan_unpoison_memory_region"))) {
-    return fn;
-  }
-#endif
-
-  // Couldn't find the function at all
-  return nullptr;
-}
-
-#endif // FOLLY_SANITIZE_ADDRESS
 
 // TVOS and WatchOS platforms have SIGSTKSZ but not sigaltstack
 #if defined(SIGSTKSZ) && !FOLLY_APPLE_TVOS && !FOLLY_APPLE_WATCHOS

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <folly/Conv.h>
 #include <folly/Optional.h>
+#include <folly/Range.h>
 #include <folly/functional/Invoke.h>
 
 namespace folly {
@@ -73,7 +74,7 @@ template <
 const typename Map::mapped_type& get_or_throw(
     const Map& map,
     const Key& key,
-    const std::string& exceptionStrPrefix = std::string()) {
+    const StringPiece& exceptionStrPrefix = StringPiece()) {
   auto pos = map.find(key);
   if (pos != map.end()) {
     return pos->second;
@@ -88,7 +89,7 @@ template <
 typename Map::mapped_type& get_or_throw(
     Map& map,
     const Key& key,
-    const std::string& exceptionStrPrefix = std::string()) {
+    const StringPiece& exceptionStrPrefix = StringPiece()) {
   auto pos = map.find(key);
   if (pos != map.end()) {
     return pos->second;
@@ -161,11 +162,28 @@ const typename Map::mapped_type& get_ref_default(
   return (pos != map.end() ? pos->second : dflt());
 }
 
+namespace detail {
+template <typename T>
+using detect_get_ptr =
+    decltype(std::declval<T>().get_ptr(std::declval<typename T::key_type>()));
+} // namespace detail
+
 /**
  * Given a map and a key, return a pointer to the value corresponding to the
  * key in the map, or nullptr if the key doesn't exist in the map.
  */
-template <class Map, typename Key = typename Map::key_type>
+template <
+    class Map,
+    typename Key = typename Map::key_type,
+    std::enable_if_t<is_detected_v<detail::detect_get_ptr, Map>, bool> = true>
+const typename Map::mapped_type* get_ptr(const Map& map, const Key& key) {
+  return map.get_ptr(key);
+}
+
+template <
+    class Map,
+    typename Key = typename Map::key_type,
+    std::enable_if_t<!is_detected_v<detail::detect_get_ptr, Map>, bool> = true>
 const typename Map::mapped_type* get_ptr(const Map& map, const Key& key) {
   auto pos = map.find(key);
   return (pos != map.end() ? &pos->second : nullptr);
@@ -174,7 +192,18 @@ const typename Map::mapped_type* get_ptr(const Map& map, const Key& key) {
 /**
  * Non-const overload of the above.
  */
-template <class Map, typename Key = typename Map::key_type>
+template <
+    class Map,
+    typename Key = typename Map::key_type,
+    std::enable_if_t<is_detected_v<detail::detect_get_ptr, Map>, bool> = true>
+typename Map::mapped_type* get_ptr(Map& map, const Key& key) {
+  return map.get_ptr(key);
+}
+
+template <
+    class Map,
+    typename Key = typename Map::key_type,
+    std::enable_if_t<!is_detected_v<detail::detect_get_ptr, Map>, bool> = true>
 typename Map::mapped_type* get_ptr(Map& map, const Key& key) {
   auto pos = map.find(key);
   return (pos != map.end() ? &pos->second : nullptr);

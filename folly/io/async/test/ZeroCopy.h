@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -223,7 +223,8 @@ class ZeroCopyTestServer : public folly::AsyncServerSocket::AcceptCallback {
 
   void connectionAccepted(
       folly::NetworkSocket fd,
-      const folly::SocketAddress& /* unused */) noexcept override {
+      const folly::SocketAddress& /* unused */,
+      AcceptInfo /* info */) noexcept override {
     auto client = std::make_shared<ZeroCopyTestAsyncSocket>(
         nullptr, evb_, fd, numLoops_, bufferSize_, zeroCopy_);
     clients_[client.get()] = client;

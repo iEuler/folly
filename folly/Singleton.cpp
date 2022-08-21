@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@
 
 #include <folly/Demangle.h>
 #include <folly/ScopeGuard.h>
-#include <folly/detail/SingletonStackTrace.h>
+#include <folly/experimental/symbolizer/Symbolizer.h>
 #include <folly/portability/Config.h>
 #include <folly/portability/FmtCompile.h>
 
@@ -50,12 +50,12 @@ static void singleton_hs_init_weak(int* argc, char** argv[])
 SingletonVault::Type SingletonVault::defaultVaultType() {
 #if FOLLY_SINGLETON_HAVE_DLSYM
   bool isPython = dlsym(RTLD_DEFAULT, "Py_Main");
-  bool isHaskel =
+  bool isHaskell =
       detail::singleton_hs_init_weak || dlsym(RTLD_DEFAULT, "hs_init");
   bool isJVM = dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs");
   bool isD = dlsym(RTLD_DEFAULT, "_d_run_main");
 
-  return isPython || isHaskel || isJVM || isD ? Type::Relaxed : Type::Strict;
+  return isPython || isHaskell || isJVM || isD ? Type::Relaxed : Type::Strict;
 #else
   return Type::Relaxed;
 #endif
@@ -97,7 +97,7 @@ std::string TypeDescriptor::name() const {
 
 [[noreturn]] void singletonWarnLeakyInstantiatingNotRegisteredAndAbort(
     const TypeDescriptor& type) {
-  auto trace = detail::getSingletonStackTrace();
+  auto trace = symbolizer::getStackTraceStr();
   LOG(FATAL) << "Creating instance for unregistered singleton: " << type.name()
              << "\n"
              << "Stacktrace:\n" << (!trace.empty() ? trace : "(not available)");
@@ -132,7 +132,7 @@ void singletonWarnDestroyInstanceLeak(
 
 [[noreturn]] void singletonWarnCreateUnregisteredAndAbort(
     const TypeDescriptor& type) {
-  auto trace = detail::getSingletonStackTrace();
+  auto trace = symbolizer::getStackTraceStr();
   LOG(FATAL) << "Creating instance for unregistered singleton: " << type.name()
              << "\n"
              << "Stacktrace:\n" << (!trace.empty() ? trace : "(not available)");
@@ -141,7 +141,7 @@ void singletonWarnDestroyInstanceLeak(
 
 [[noreturn]] void singletonWarnCreateBeforeRegistrationCompleteAndAbort(
     const TypeDescriptor& type) {
-  auto trace = detail::getSingletonStackTrace();
+  auto trace = symbolizer::getStackTraceStr();
   LOG(FATAL) << "Singleton " << type.name() << " requested before "
              << "registrationComplete() call.\n"
              << "This usually means that either main() never called "
@@ -152,7 +152,7 @@ void singletonWarnDestroyInstanceLeak(
 }
 
 void singletonPrintDestructionStackTrace(const TypeDescriptor& type) {
-  auto trace = detail::getSingletonStackTrace();
+  auto trace = symbolizer::getStackTraceStr();
   LOG(ERROR) << "Singleton " << type.name() << " was released.\n"
              << "Stacktrace:\n" << (!trace.empty() ? trace : "(not available)");
 }
@@ -205,7 +205,7 @@ FatalHelper __attribute__((__init_priority__(101))) fatalHelper;
 } // namespace
 
 SingletonVault::SingletonVault(Type type) noexcept : type_(type) {
-  detail::AtFork::registerHandler(
+  AtFork::registerHandler(
       this,
       /*prepare*/
       [this]() {
@@ -231,7 +231,7 @@ SingletonVault::SingletonVault(Type type) noexcept : type_(type) {
 }
 
 SingletonVault::~SingletonVault() {
-  detail::AtFork::unregisterHandler(this);
+  AtFork::unregisterHandler(this);
   destroyInstances();
 }
 
@@ -262,6 +262,23 @@ void SingletonVault::addEagerInitSingleton(detail::SingletonHolderBase* entry) {
 
   auto eagerInitSingletons = eagerInitSingletons_.wlock();
   eagerInitSingletons->insert(entry);
+}
+
+void SingletonVault::addEagerInitOnReenableSingleton(
+    detail::SingletonHolderBase* entry) {
+  auto state = state_.rlock();
+  state->check(detail::SingletonVaultState::Type::Running);
+
+  if (UNLIKELY(state->registrationComplete) &&
+      type_.load(std::memory_order_relaxed) == Type::Strict) {
+    LOG(ERROR)
+        << "Registering for eager-load on re-enable after registrationComplete().";
+  }
+
+  CHECK_THROW(singletons_.rlock()->count(entry->type()), std::logic_error);
+
+  auto eagerInitOnReenableSingletons = eagerInitOnReenableSingletons_.wlock();
+  eagerInitOnReenableSingletons->insert(entry);
 }
 
 void SingletonVault::registrationComplete() {
@@ -385,11 +402,22 @@ void SingletonVault::destroyInstances() {
 }
 
 void SingletonVault::reenableInstances() {
-  auto state = state_.wlock();
+  {
+    auto state = state_.wlock();
 
-  state->check(detail::SingletonVaultState::Type::Quiescing);
+    state->check(detail::SingletonVaultState::Type::Quiescing);
 
-  state->state = detail::SingletonVaultState::Type::Running;
+    state->state = detail::SingletonVaultState::Type::Running;
+  }
+
+  auto eagerInitOnReenableSingletons = eagerInitOnReenableSingletons_.copy();
+  auto instantiatedAtLeastOnce = instantiatedAtLeastOnce_.copy();
+  for (auto* single : eagerInitOnReenableSingletons) {
+    if (!instantiatedAtLeastOnce.count(single->type())) {
+      continue;
+    }
+    single->createInstance();
+  }
 }
 
 void SingletonVault::scheduleDestroyInstances() {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -239,9 +239,12 @@ class EDFThreadPoolExecutor::TaskQueue {
 };
 
 EDFThreadPoolExecutor::EDFThreadPoolExecutor(
-    std::size_t numThreads, std::shared_ptr<ThreadFactory> threadFactory)
+    std::size_t numThreads,
+    std::shared_ptr<ThreadFactory> threadFactory,
+    std::unique_ptr<EDFThreadPoolSemaphore> semaphore)
     : ThreadPoolExecutor(numThreads, numThreads, std::move(threadFactory)),
-      taskQueue_(std::make_unique<TaskQueue>()) {
+      taskQueue_(std::make_unique<TaskQueue>()),
+      sem_(std::move(semaphore)) {
   setNumThreads(numThreads);
   registerThreadPoolExecutor(this);
 }
@@ -255,10 +258,6 @@ void EDFThreadPoolExecutor::add(Func f) {
   add(std::move(f), kLatestDeadline);
 }
 
-void EDFThreadPoolExecutor::add(Func f, uint64_t deadline) {
-  add(std::move(f), 1, deadline);
-}
-
 void EDFThreadPoolExecutor::add(Func f, std::size_t total, uint64_t deadline) {
   if (UNLIKELY(isJoin_.load(std::memory_order_relaxed) || total == 0)) {
     return;
@@ -270,7 +269,7 @@ void EDFThreadPoolExecutor::add(Func f, std::size_t total, uint64_t deadline) {
   if (numIdleThreads > 0) {
     // If idle threads are available notify them, otherwise all worker threads
     // are running and will get around to this task in time.
-    sem_.post(std::min(total, numIdleThreads));
+    sem_->post(std::min(total, numIdleThreads));
   }
 }
 
@@ -286,7 +285,7 @@ void EDFThreadPoolExecutor::add(std::vector<Func> fs, uint64_t deadline) {
   if (numIdleThreads > 0) {
     // If idle threads are available notify them, otherwise all worker threads
     // are running and will get around to this task in time.
-    sem_.post(std::min(total, numIdleThreads));
+    sem_->post(std::min(total, numIdleThreads));
   }
 }
 
@@ -390,7 +389,7 @@ void EDFThreadPoolExecutor::threadRun(ThreadPtr thread) {
 // threadListLock_ is writelocked.
 void EDFThreadPoolExecutor::stopThreads(std::size_t numThreads) {
   threadsToStop_.fetch_add(numThreads, std::memory_order_relaxed);
-  sem_.post(numThreads);
+  sem_->post(numThreads);
 }
 
 // threadListLock_ is read (or write) locked.
@@ -446,7 +445,7 @@ std::shared_ptr<EDFThreadPoolExecutor::Task> EDFThreadPoolExecutor::take() {
       return nullptr;
     }
 
-    sem_.wait();
+    sem_->wait();
   }
 }
 

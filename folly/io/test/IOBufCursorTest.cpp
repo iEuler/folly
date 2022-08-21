@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -96,6 +96,7 @@ TEST(IOBuf, copy_assign_convert) {
   EXPECT_EQ(1, cursor2.read<uint8_t>());
   EXPECT_EQ(2, cursor3.read<uint8_t>());
   EXPECT_EQ(3, cursor4.read<uint8_t>());
+  EXPECT_EQ(3, cursor5.read<uint8_t>());
 }
 
 TEST(IOBuf, arithmetic) {
@@ -237,6 +238,28 @@ TEST(IOBuf, PullAndPeek) {
     EXPECT_EQ(1, iobuf1->countChainElements());
     EXPECT_EQ(11, iobuf1->computeChainDataLength());
   }
+}
+
+TEST(IOBuf, pullFromChainContainingEmptyBufs) {
+  std::unique_ptr<IOBuf> iobuf1(IOBuf::create(10));
+  append(iobuf1, "he");
+  std::unique_ptr<IOBuf> iobuf2(IOBuf::create(10));
+  append(iobuf2, "llo ");
+  std::unique_ptr<IOBuf> iobuf3(IOBuf::create(10));
+  append(iobuf3, "world");
+  iobuf1->appendToChain(std::move(iobuf2));
+  // Add a default-constructed IOBuf which has 0 length and a null data pointer
+  // This doesn't affect the logical contents of the chain, it's here to
+  // make sure the pull() logic doesn't try to call memcpy() with a null
+  // pointer argument.
+  iobuf1->appendToChain(std::make_unique<folly::IOBuf>());
+  iobuf1->appendToChain(std::move(iobuf3));
+
+  std::string output;
+  output.resize(iobuf1->computeChainDataLength());
+  auto cursor = Cursor(iobuf1.get());
+  cursor.pull(&output[0], iobuf1->computeChainDataLength());
+  EXPECT_EQ("hello world", output);
 }
 
 TEST(IOBuf, pushCursorData) {
@@ -614,6 +637,26 @@ TEST(IOBuf, QueueAppenderInsertClone) {
   EXPECT_EQ(x, queue.front()->next()->data()[0]);
 }
 
+TEST(IOBuf, QueueAppenderReuseTail) {
+  folly::IOBufQueue queue;
+  QueueAppender appender{&queue, 100};
+  constexpr StringPiece prologue = "hello";
+  appender.pushAtMost(
+      reinterpret_cast<const uint8_t*>(prologue.data()), prologue.size());
+  size_t expectedCapacity = queue.front()->capacity();
+
+  auto unpackable = IOBuf::create(folly::IOBufQueue::kMaxPackCopy + 1);
+  unpackable->append(folly::IOBufQueue::kMaxPackCopy + 1);
+  expectedCapacity += unpackable->capacity();
+  appender.insert(std::move(unpackable));
+
+  constexpr StringPiece epilogue = " world";
+  appender.pushAtMost(
+      reinterpret_cast<const uint8_t*>(epilogue.data()), epilogue.size());
+
+  EXPECT_EQ(queue.front()->computeChainCapacity(), expectedCapacity);
+}
+
 TEST(IOBuf, QueueAppenderRWCursor) {
   folly::IOBufQueue queue;
 
@@ -679,7 +722,7 @@ TEST(IOBuf, CursorOperators) {
   {
     std::unique_ptr<IOBuf> chain(IOBuf::create(20));
     chain->append(10);
-    chain->appendChain(chain->clone());
+    chain->appendToChain(chain->clone());
     EXPECT_EQ(20, chain->computeChainDataLength());
 
     Cursor curs1(chain.get());
@@ -724,7 +767,7 @@ TEST(IOBuf, CursorOperators) {
   {
     auto chain = IOBuf::create(10);
     chain->append(10);
-    chain->appendChain(chain->clone());
+    chain->appendToChain(chain->clone());
     EXPECT_EQ(2, chain->countChainElements());
     EXPECT_EQ(20, chain->computeChainDataLength());
 
@@ -1238,7 +1281,7 @@ TEST(IOBuf, BoundedCursorSanity) {
   EXPECT_THROW(subC.skip(1), std::out_of_range);
 
   // multi-item chain
-  chain1->appendChain(chain1->clone());
+  chain1->appendToChain(chain1->clone());
   EXPECT_EQ(2, chain1->countChainElements());
   EXPECT_EQ(20, chain1->computeChainDataLength());
 
@@ -1438,7 +1481,7 @@ TEST(IOBuf, BoundedCursorOperators) {
   {
     auto chain = IOBuf::create(10);
     chain->append(10);
-    chain->appendChain(chain->clone());
+    chain->appendToChain(chain->clone());
     EXPECT_EQ(2, chain->countChainElements());
     EXPECT_EQ(20, chain->computeChainDataLength());
 

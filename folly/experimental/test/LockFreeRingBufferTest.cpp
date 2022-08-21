@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -255,6 +255,22 @@ TEST(LockFreeRingBuffer, contendedReadsAndWrites) {
   for (auto& thread : threads) {
     thread.join();
   }
+}
+
+TEST(LockFreeRingBuffer, cursorComparison) {
+  LockFreeRingBuffer<int> rb{2};
+  rb.write(5);
+  EXPECT_TRUE(rb.currentHead() == rb.currentHead());
+  EXPECT_FALSE(rb.currentHead() == rb.currentTail());
+
+  EXPECT_TRUE(rb.currentHead() != rb.currentTail());
+  EXPECT_FALSE(rb.currentHead() != rb.currentHead());
+
+  EXPECT_TRUE(rb.currentHead() > rb.currentTail());
+  EXPECT_FALSE(rb.currentTail() > rb.currentHead());
+
+  EXPECT_TRUE(rb.currentTail() < rb.currentHead());
+  EXPECT_FALSE(rb.currentHead() < rb.currentTail());
 }
 
 } // namespace folly

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -280,6 +280,15 @@ BENCHMARK_MULTI(multiSimple) {
 
 BENCHMARK_RELATIVE_MULTI(multiSimpleRel) {
   FOR_EACH_RANGE (i, 0, 10) {
+    fun();
+    fun();
+  }
+  return 10;
+}
+
+BENCHMARK_RELATIVE_MULTI(multiSimpleRelThree) {
+  FOR_EACH_RANGE (i, 0, 10) {
+    fun();
     fun();
     fun();
   }

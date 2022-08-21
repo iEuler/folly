@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,9 +48,9 @@ void multiAttemptExpectDurationWithin(
   }
   sort(durations.begin(), durations.end());
   for (auto d : durations) {
-    EXPECT_GE(d, min_duration);
+    EXPECT_GE(d.count(), min_duration.count());
   }
-  EXPECT_LE(durations[0], max_duration);
+  EXPECT_LE(durations[0].count(), max_duration.count());
 }
 
 TEST(RetryingTest, has_op_call) {
@@ -272,17 +272,17 @@ TEST(RetryingTest, policy_capped_jittered_exponential_backoff_many_retries) {
   Duration max_backoff(10000000);
   Duration backoff = retryingJitteredExponentialBackoffDur(
       80, min_backoff, max_backoff, 0, rng);
-  EXPECT_EQ(backoff, max_backoff);
+  EXPECT_EQ(backoff.count(), max_backoff.count());
 
   max_backoff = Duration(std::numeric_limits<int64_t>::max());
   backoff = retryingJitteredExponentialBackoffDur(
       63, min_backoff, max_backoff, 0, rng);
-  EXPECT_LT(backoff, max_backoff);
+  EXPECT_LT(backoff.count(), max_backoff.count());
 
   max_backoff = Duration(std::numeric_limits<int64_t>::max());
   backoff = retryingJitteredExponentialBackoffDur(
       64, min_backoff, max_backoff, 0, rng);
-  EXPECT_EQ(backoff, max_backoff);
+  EXPECT_EQ(backoff.count(), max_backoff.count());
 }
 
 TEST(RetryingTest, policy_capped_jittered_exponential_backoff_min_zero) {
@@ -334,10 +334,9 @@ TEST(RetryingTest, large_retries) {
   newMemLimit.rlim_cur =
       std::min(static_cast<rlim_t>(1UL << 30), oldMemLimit.rlim_max);
   newMemLimit.rlim_max = oldMemLimit.rlim_max;
-  if (!folly::kIsSanitize) { // sanitizers reserve outside of the rlimit
-    PCHECK(setrlimit(RLIMIT_AS, &newMemLimit) == 0);
-  }
-  SCOPE_EXIT { PCHECK(setrlimit(RLIMIT_AS, &oldMemLimit) == 0); };
+  auto const lowered = // sanitizers reserve outside of the rlimit
+      !folly::kIsSanitize && setrlimit(RLIMIT_AS, &newMemLimit) != 0;
+  SCOPE_EXIT { PCHECK(!lowered || setrlimit(RLIMIT_AS, &oldMemLimit) == 0); };
 #endif
 
   TestExecutor executor(4);

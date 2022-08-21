@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #pragma once
 
 #include <memory>
+#include <folly/io/SocketOptionMap.h>
 
 #include <folly/Function.h>
 #include <folly/ScopeGuard.h>
@@ -28,6 +29,7 @@
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventHandler.h>
 #include <folly/net/NetOps.h>
+#include <folly/net/NetOpsDispatcher.h>
 #include <folly/net/NetworkSocket.h>
 
 namespace folly {
@@ -38,6 +40,9 @@ namespace folly {
 class AsyncUDPSocket : public EventHandler {
  public:
   enum class FDOwnership { OWNS, SHARED };
+
+  AsyncUDPSocket(const AsyncUDPSocket&) = delete;
+  AsyncUDPSocket& operator=(const AsyncUDPSocket&) = delete;
 
   class ReadCallback {
    public:
@@ -228,6 +233,17 @@ class AsyncUDPSocket : public EventHandler {
   }
 
   /**
+   * Set extra control messages to send
+   */
+  virtual void setCmsgs(const SocketOptionMap& cmsgs);
+  virtual void setNontrivialCmsgs(
+      const SocketNontrivialOptionMap& nontrivialCmsgs);
+
+  virtual void appendCmsgs(const SocketOptionMap& cmsgs);
+  virtual void appendNontrivialCmsgs(
+      const SocketNontrivialOptionMap& nontrivialCmsgs);
+
+  /**
    * Send the data in buffer to destination. Returns the return code from
    * ::sendmsg.
    */
@@ -324,6 +340,17 @@ class AsyncUDPSocket : public EventHandler {
     CHECK_NE(NetworkSocket(), fd_) << "Need to bind before getting FD out";
     return fd_;
   }
+
+  /**
+   * Set IP_FREEBIND to allow binding to an address that is nonlocal or doesn't
+   * exist yet.
+   */
+  virtual void setFreeBind(bool freeBind) { freeBind_ = freeBind; }
+
+  /**
+   * Set IP_TRANSPARENT to allow enables transparent proxying on the socket
+   */
+  virtual void setTransparent(bool transparent) { transparent_ = transparent; }
 
   /**
    * Set reuse port mode to call bind() on the same address multiple times
@@ -441,8 +468,33 @@ class AsyncUDPSocket : public EventHandler {
 
   void setTrafficClass(int tclass);
 
-  void applyOptions(
+  virtual void applyOptions(
       const SocketOptionMap& options, SocketOptionKey::ApplyPos pos);
+
+  virtual void applyNontrivialOptions(
+      const SocketNontrivialOptionMap& options, SocketOptionKey::ApplyPos pos);
+
+  /**
+   * Override netops::Dispatcher to be used for netops:: calls.
+   *
+   * Pass empty shared_ptr to reset to default.
+   * Override can be used by unit tests to intercept and mock netops:: calls.
+   */
+  virtual void setOverrideNetOpsDispatcher(
+      std::shared_ptr<netops::Dispatcher> dispatcher) {
+    netops_.setOverride(std::move(dispatcher));
+  }
+
+  /**
+   * Returns override netops::Dispatcher being used for netops:: calls.
+   *
+   * Returns empty shared_ptr if no override set.
+   * Override can be used by unit tests to intercept and mock netops:: calls.
+   */
+  virtual std::shared_ptr<netops::Dispatcher> getOverrideNetOpsDispatcher()
+      const {
+    return netops_.getOverride();
+  }
 
  protected:
   struct full_sockaddr_storage {
@@ -452,7 +504,7 @@ class AsyncUDPSocket : public EventHandler {
 
   virtual ssize_t sendmsg(
       NetworkSocket socket, const struct msghdr* message, int flags) {
-    return netops::sendmsg(socket, message, flags);
+    return netops_->sendmsg(socket, message, flags);
   }
 
   virtual int sendmmsg(
@@ -460,7 +512,7 @@ class AsyncUDPSocket : public EventHandler {
       struct mmsghdr* msgvec,
       unsigned int vlen,
       int flags) {
-    return netops::sendmmsg(socket, msgvec, vlen, flags);
+    return netops_->sendmmsg(socket, msgvec, vlen, flags);
   }
 
   void fillMsgVec(
@@ -471,7 +523,7 @@ class AsyncUDPSocket : public EventHandler {
       struct iovec* iov,
       size_t iov_count,
       const int* gso,
-      char* gsoControl);
+      char* control);
 
   virtual int writeImpl(
       Range<SocketAddress const*> addrs,
@@ -479,7 +531,9 @@ class AsyncUDPSocket : public EventHandler {
       size_t count,
       struct mmsghdr* msgvec,
       const int* gso,
-      char* gsoControl);
+      char* control);
+
+  virtual ssize_t writevImpl(struct msghdr* msg, FOLLY_MAYBE_UNUSED int gso);
 
   size_t handleErrMessages() noexcept;
 
@@ -493,9 +547,6 @@ class AsyncUDPSocket : public EventHandler {
   ReadCallback* readCallback_;
 
  private:
-  AsyncUDPSocket(const AsyncUDPSocket&) = delete;
-  AsyncUDPSocket& operator=(const AsyncUDPSocket&) = delete;
-
   void init(sa_family_t family, BindOptions bindOptions);
 
   // EventHandler
@@ -519,6 +570,8 @@ class AsyncUDPSocket : public EventHandler {
 
   bool reuseAddr_{false};
   bool reusePort_{false};
+  bool freeBind_{false};
+  bool transparent_{false};
   int rcvBuf_{0};
   int sndBuf_{0};
   int busyPollUs_{0};
@@ -559,6 +612,12 @@ class AsyncUDPSocket : public EventHandler {
   std::unordered_map<uint32_t, std::unique_ptr<folly::IOBuf>> idZeroCopyBufMap_;
 
   IOBufFreeFunc ioBufFreeFunc_;
+
+  SocketOptionMap cmsgs_;
+
+  SocketNontrivialOptionMap nontrivialCmsgs_;
+
+  netops::DispatcherContainer netops_;
 };
 
 } // namespace folly

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -156,4 +156,13 @@ TEST(SharedPromise, ConstMethods) {
   p.setValue(42);
   EXPECT_TRUE(fut.isReady());
   EXPECT_EQ(42, std::move(fut).get());
+}
+
+TEST(SharedPromise, InterruptHandlerSetsException) {
+  folly::SharedPromise<int> p;
+  p.setInterruptHandler([&](auto&& ew) { p.setException(ew); });
+  auto f = p.getSemiFuture();
+  f.cancel();
+  ASSERT_TRUE(f.isReady());
+  EXPECT_THROW(std::move(f).get(), FutureCancellation);
 }

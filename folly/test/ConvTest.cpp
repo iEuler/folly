@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -520,6 +520,32 @@ TEST(Conv, FBStringToString) {
   EXPECT_EQ(ret2, "foo2");
 }
 
+TEST(Conv, RoundTripInfinityBetweenFloatingPointTypes) {
+  // float -> double -> float
+  EXPECT_EQ(
+      to<float>(to<double>(numeric_limits<float>::infinity())),
+      numeric_limits<float>::infinity());
+  EXPECT_EQ(
+      to<float>(to<double>(-numeric_limits<float>::infinity())),
+      -numeric_limits<float>::infinity());
+
+  // float -> long double -> float
+  EXPECT_EQ(
+      to<float>(to<long double>(numeric_limits<float>::infinity())),
+      numeric_limits<float>::infinity());
+  EXPECT_EQ(
+      to<float>(to<long double>(-numeric_limits<float>::infinity())),
+      -numeric_limits<float>::infinity());
+
+  // double -> long double -> double
+  EXPECT_EQ(
+      to<double>(to<long double>(numeric_limits<double>::infinity())),
+      numeric_limits<double>::infinity());
+  EXPECT_EQ(
+      to<double>(to<long double>(-numeric_limits<double>::infinity())),
+      -numeric_limits<double>::infinity());
+}
+
 TEST(Conv, StringPieceToDouble) {
   vector<tuple<const char*, const char*, double>> strs{
       make_tuple("2134123.125 zorro", " zorro", 2134123.125),
@@ -644,6 +670,26 @@ TEST(Conv, DoubleToInt) {
   } catch (std::range_error&) {
     // LOG(INFO) << e.what();
   }
+}
+
+namespace {
+
+template <class From, class To>
+void testNotFiniteToInt() {
+  for (auto s : {"nan", "inf", "-inf"}) {
+    auto v = to<From>(s);
+    auto rv = folly::tryTo<To>(v);
+    EXPECT_FALSE(rv.hasValue()) << s << " " << rv.value();
+  }
+}
+
+} // namespace
+
+TEST(Conv, NotFiniteToInt) {
+  testNotFiniteToInt<float, int64_t>();
+  testNotFiniteToInt<float, uint64_t>();
+  testNotFiniteToInt<double, int64_t>();
+  testNotFiniteToInt<double, uint64_t>();
 }
 
 TEST(Conv, EnumToInt) {
@@ -817,6 +863,7 @@ TEST(Conv, FloatToInt) {
   EXPECT_THROW(
       to<uint64_t>(static_cast<float>(std::numeric_limits<uint64_t>::max())),
       std::range_error);
+  EXPECT_THROW(to<uint64_t>(static_cast<float>(-1)), std::range_error);
 }
 
 TEST(Conv, IntToFloat) {
@@ -837,6 +884,11 @@ TEST(Conv, IntToFloat) {
   EXPECT_THROW(
       to<double>(std::numeric_limits<__int128>::min() + 1), std::range_error);
 #endif
+}
+
+TEST(Conv, BoolToString) {
+  EXPECT_EQ(to<std::string>(true), "1");
+  EXPECT_EQ(to<std::string>(false), "0");
 }
 
 TEST(Conv, BoolToFloat) {

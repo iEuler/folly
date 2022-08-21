@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,12 +30,15 @@
 #include <folly/Portability.h>
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/container/Access.h>
 #include <folly/io/async/ssl/OpenSSLUtils.h>
 #include <folly/portability/OpenSSL.h>
 #include <folly/ssl/OpenSSLLockTypes.h>
 #include <folly/ssl/OpenSSLPtrTypes.h>
 
 namespace folly {
+
+class OpenSSLTicketHandler;
 
 /**
  * Override the default password collector.
@@ -94,6 +97,7 @@ class SSLContext {
     SSLv3,
     TLSv1, // support TLS 1.0+
     TLSv1_2, // support for only TLS 1.2+
+    TLSv1_3,
   };
 
   /**
@@ -197,8 +201,8 @@ class SSLContext {
 
   template <typename Container>
   void setCipherList(const Container& cipherList) {
-    using namespace std;
-    setCipherList(begin(cipherList), end(cipherList));
+    setCipherList(
+        folly::access::begin(cipherList), folly::access::end(cipherList));
   }
 
   template <typename Value>
@@ -224,8 +228,8 @@ class SSLContext {
 
   template <typename Container>
   void setSignatureAlgorithms(const Container& sigalgs) {
-    using namespace std;
-    setSignatureAlgorithms(begin(sigalgs), end(sigalgs));
+    setSignatureAlgorithms(
+        folly::access::begin(sigalgs), folly::access::end(sigalgs));
   }
 
   template <typename Value>
@@ -239,6 +243,8 @@ class SSLContext {
    * @param ecCurves A list of ec curves, eg: P-256
    */
   void setClientECCurvesList(const std::vector<std::string>& ecCurves);
+
+  void setSupportedGroups(const std::vector<std::string>& groups);
 
   /**
    * Method to add support for a specific elliptic curve encryption algorithm.
@@ -395,11 +401,48 @@ class SSLContext {
    * @param store X509 certificate store.
    */
   virtual void loadTrustedCertificates(X509_STORE* store);
+
   /**
-   * Load a client CA list for validating clients
+   * setSupportedClientCertificateAuthorityNames sets the list of acceptable
+   * client certificate authoritites that will be sent to the client.
+   *
+   * This corresponds to the `certificate_authorities` extension.
+   *
+   * This function does *not* alter the way client authentication is performed
+   * in any discernible manner.
+   *
+   * Certain TLS client implementations will use this list of names to aid in
+   * the client certificate selection process.
+   *
+   * folly::AsyncSSLSocket, which is based on OpenSSL, in particular will
+   * *not* use this information. folly::AsyncSSLSocket will send client
+   * certificates to whatever `SSLContext::loadCertificate` points to,
+   * regardless of what the server sends in `certificate_authorities`.
+   *
+   * @param names  A vector of X509_NAMEs to send. This typically corresponds
+   *               to the Subject of each client certificate authority used
+   *               in the trust store.
+   *               `OpenSSLUtil::loadNamesFromFile`.
+   * @throws std::exception
    */
-  virtual void loadClientCAList(const char* path);
+  void setSupportedClientCertificateAuthorityNames(
+      std::vector<ssl::X509NameUniquePtr> names);
+
   /**
+   * setSupportedClientCertificateAuthorityNamesFromFile sets the list of
+   * acceptable client certificate authorities that will be sent to the client.
+   *
+   * See `SSLContext::setSupportedClientCertificateAuthorityNames`.
+   *
+   * @param path   Path to a file containing PEM encoded X509 certificates.
+   * @throws std::exception
+   */
+  void setSupportedClientCertificateAuthorityNamesFromFile(const char* path) {
+    return setSupportedClientCertificateAuthorityNames(
+        ssl::OpenSSLUtils::subjectNamesInPEMFile(path));
+  }
+
+  /*
    * Override default OpenSSL password collector.
    *
    * @param collector Instance of user defined password collector
@@ -484,6 +527,8 @@ class SSLContext {
   void setOptions(long options);
 
 #if FOLLY_OPENSSL_HAS_ALPN
+  std::string getAdvertisedNextProtocols();
+
   /**
    * Set the list of protocols that this SSL context supports. In client
    * mode, this is the list of protocols that will be advertised for Application
@@ -529,6 +574,13 @@ class SSLContext {
    */
   void unsetNextProtocols();
   void deleteNextProtocolsStrings();
+
+  bool getAlpnAllowMismatch() const { return alpnAllowMismatch_; }
+
+  void setAlpnAllowMismatch(bool allowMismatch) {
+    alpnAllowMismatch_ = allowMismatch;
+  }
+
 #endif // FOLLY_OPENSSL_HAS_ALPN
 
   /**
@@ -569,6 +621,10 @@ class SSLContext {
   }
 
   const SSLAcceptRunner* sslAcceptRunner() { return sslAcceptRunner_.get(); }
+
+  void setTicketHandler(std::unique_ptr<OpenSSLTicketHandler> handler);
+
+  OpenSSLTicketHandler* getTicketHandler() { return ticketHandler_.get(); }
 
   /**
    * Helper to match a hostname versus a pattern.
@@ -640,6 +696,7 @@ class SSLContext {
   static bool initialized_;
 
   std::unique_ptr<SSLAcceptRunner> sslAcceptRunner_;
+  std::unique_ptr<OpenSSLTicketHandler> ticketHandler_;
 
 #if FOLLY_OPENSSL_HAS_ALPN
 
@@ -667,6 +724,8 @@ class SSLContext {
       void* data);
 
   size_t pickNextProtocols();
+
+  bool alpnAllowMismatch_{true};
 
 #endif // FOLLY_OPENSSL_HAS_ALPN
 

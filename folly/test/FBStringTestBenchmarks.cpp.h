@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -118,7 +118,8 @@ void BENCHFUN(resize)(size_t iters, size_t arg) {
 BENCHMARK_PARAM(BENCHFUN(resize), 524288)
 
 void BENCHFUN(findSuccessful)(size_t iters, size_t /* arg */) {
-  size_t pos, len;
+  size_t pos = 0;
+  size_t len = 0;
   STRING s;
 
   BENCHMARK_SUSPEND {

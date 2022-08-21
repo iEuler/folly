@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -332,8 +332,7 @@ class UnboundedQueue {
 
   /** try_peek */
   FOLLY_ALWAYS_INLINE const T* try_peek() noexcept {
-    /* This function is supported only for USPSC and UMPSC queues. */
-    DCHECK(SingleConsumer);
+    static_assert(SingleConsumer, "not single-consumer");
     return tryPeekUntil(std::chrono::steady_clock::time_point::min());
   }
 
@@ -361,8 +360,8 @@ class UnboundedQueue {
     } else {
       // Using hazptr_holder instead of hazptr_local because it is
       // possible that the T ctor happens to use hazard pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(p_.tail);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(p_.tail);
       enqueueCommon(s, std::forward<Arg>(arg));
     }
   }
@@ -396,8 +395,8 @@ class UnboundedQueue {
       // Using hazptr_holder instead of hazptr_local because it is
       // possible to call the T dtor and it may happen to use hazard
       // pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(c_.head);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(c_.head);
       return dequeueCommon(s);
     }
   }
@@ -427,8 +426,8 @@ class UnboundedQueue {
     } else {
       // Using hazptr_holder instead of hazptr_local because it is
       //  possible to call ~T() and it may happen to use hazard pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(c_.head);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(c_.head);
       return tryDequeueUntilMC(s, deadline);
     }
   }
@@ -499,6 +498,8 @@ class UnboundedQueue {
   template <typename Clock, typename Duration>
   FOLLY_ALWAYS_INLINE const T* tryPeekUntil(
       const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
+    // This function is supported only for USPSC and UMPSC queues.
+    DCHECK(SingleConsumer);
     Segment* s = head();
     Ticket t = consumerTicket();
     DCHECK_GE(t, s->minTicket());

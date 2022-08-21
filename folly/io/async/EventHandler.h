@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -177,6 +177,10 @@ class EventHandler {
   void setEventCallback(EventReadCallback* cb) { event_.setCallback(cb); }
 
   void setEventCallback(EventRecvmsgCallback* cb) { event_.setCallback(cb); }
+
+  void setRecvmsgMultishotCallback(EventRecvmsgMultishotCallback* cb) {
+    event_.setCallback(cb);
+  }
 
   void resetEventCallback() { event_.resetCallback(); }
 

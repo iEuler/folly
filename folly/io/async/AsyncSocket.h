@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,11 +22,12 @@
 #include <map>
 #include <memory>
 
-#include <folly/ConstructorCallback.h>
+#include <folly/ConstructorCallbackList.h>
 #include <folly/Optional.h>
 #include <folly/SocketAddress.h>
 #include <folly/detail/SocketFastOpen.h>
 #include <folly/io/IOBuf.h>
+#include <folly/io/IOBufIovecBuilder.h>
 #include <folly/io/ShutdownSocketSet.h>
 #include <folly/io/SocketOptionMap.h>
 #include <folly/io/async/AsyncSocketException.h>
@@ -650,6 +651,31 @@ class AsyncSocket : public AsyncTransport {
     }
   }
 
+  /**
+   * Create a memory store to use for zero copy reads.
+   *
+   * The memory store contains a fixed number of entries, each with a fixed
+   * size.  When data is read using zero-copy the kernel will place it in one
+   * of these entries, and it will be returned to the callback with
+   * readZeroCopyDataAvailable().  The callback must release the IOBuf
+   * reference to make the entry available again for future zero-copy reads.
+   * If all entries are exhausted the read code will fall back to non-zero-copy
+   * reads.
+   *
+   * Note: it is the caller's responsibility to ensure that they do not destroy
+   * the ZeroCopyMemStore while it still has any outstanding entries in use.
+   * The caller must ensure the ZeroCopyMemStore exists until all callers have
+   * finished using any data returned via zero-copy reads, and released the
+   * IOBuf objects containing that data.
+   *
+   * @param entries  The number of entries to allocate in the memory store.
+   * @param size     The size of each entry, in bytes.  This should be a
+   *                 multiple of the kernel page size.
+   */
+
+  static std::unique_ptr<AsyncReader::ReadCallback::ZeroCopyMemStore>
+  createDefaultZeroCopyMemStore(size_t entries, size_t size);
+
   bool setZeroCopy(bool enable) override;
   bool getZeroCopy() const override { return zeroCopyEnabled_; }
 
@@ -732,6 +758,10 @@ class AsyncSocket : public AsyncTransport {
     return totalAppBytesScheduledForWrite_ - appBytesWritten_;
   }
   size_t getRawBytesBuffered() const override { return getAppBytesBuffered(); }
+
+  size_t getAllocatedBytesBuffered() const override {
+    return allocatedBytesBuffered_;
+  }
 
   // End of methods inherited from AsyncTransport
 
@@ -1109,6 +1139,14 @@ class AsyncSocket : public AsyncTransport {
     virtual void fdDetach(AsyncSocket* /* socket */) noexcept = 0;
 
     /**
+     * fdAttach() is invoked when the socket file descriptor is attached.
+     *
+     * @param socket      Socket for which handleNetworkSocketAttached was
+     * invoked.
+     */
+    virtual void fdAttach(AsyncSocket* /* socket */) noexcept {}
+
+    /**
      * move() will be invoked when a new AsyncSocket is being constructed via
      * constructor AsyncSocket(AsyncSocket* oldAsyncSocket) from an AsyncSocket
      * that has an observer attached.
@@ -1176,6 +1214,17 @@ class AsyncSocket : public AsyncTransport {
    */
   FOLLY_NODISCARD virtual std::vector<AsyncTransport::LifecycleObserver*>
   getLifecycleObservers() const override;
+
+  /**
+   * Split iovec array at given byte offsets; produce a new array with result.
+   */
+  static void splitIovecArray(
+      const size_t startOffset,
+      const size_t endOffset,
+      const iovec* srcVec,
+      const size_t srcCount,
+      iovec* dstVec,
+      size_t& dstCount);
 
  protected:
   enum ReadResultEnum {
@@ -1287,17 +1336,29 @@ class AsyncSocket : public AsyncTransport {
     }
   }
 
+  void drainErrorQueue() noexcept;
+
   // event notification methods
   void ioReady(uint16_t events) noexcept;
   virtual void checkForImmediateRead() noexcept;
   virtual void handleInitialReadWrite() noexcept;
   virtual void prepareReadBuffer(void** buf, size_t* buflen);
-  virtual size_t prepareReadBuffers(struct iovec* iovs, size_t num);
+  virtual void prepareReadBuffers(IOBufIovecBuilder::IoVecVec& iovs);
   virtual size_t handleErrMessages() noexcept;
   virtual void handleRead() noexcept;
   virtual void handleWrite() noexcept;
   virtual void handleConnect() noexcept;
   void timeoutExpired() noexcept;
+
+  /**
+   * Handler for when the file descriptor is attached to the AsyncSocket.
+
+   * This updates the EventHandler to start using the fd and notifies all
+   * observers attached to the socket. This is necessary to let
+   * observers know about an attached fd immediately (i.e., on connection
+   * attempt) rather than when the connection succeeds.
+   */
+  virtual void handleNetworkSocketAttached();
 
   /**
    * Attempt to read from the socket into a single buffer
@@ -1433,13 +1494,19 @@ class AsyncSocket : public AsyncTransport {
   void doClose();
 
   // error handling methods
+  enum class ReadCode {
+    READ_NOT_SUPPORTED = 0,
+    READ_CONTINUE = 1,
+    READ_DONE = 2,
+  };
+
   void startFail();
   void finishFail();
   void finishFail(const AsyncSocketException& ex);
   void invokeAllErrors(const AsyncSocketException& ex);
   void fail(const char* fn, const AsyncSocketException& ex);
   void failConnect(const char* fn, const AsyncSocketException& ex);
-  void failRead(const char* fn, const AsyncSocketException& ex);
+  ReadCode failRead(const char* fn, const AsyncSocketException& ex);
   void failErrMessageRead(const char* fn, const AsyncSocketException& ex);
   void failWrite(
       const char* fn,
@@ -1451,6 +1518,7 @@ class AsyncSocket : public AsyncTransport {
   void failByteEvents(const AsyncSocketException& ex);
   virtual void invokeConnectErr(const AsyncSocketException& ex);
   virtual void invokeConnectSuccess();
+  virtual void invokeConnectAttempt();
   void invalidState(ConnectCallback* callback);
   void invalidState(ErrMessageCallback* callback);
   void invalidState(ReadCallback* callback);
@@ -1479,6 +1547,11 @@ class AsyncSocket : public AsyncTransport {
   bool containsZeroCopyBuf(folly::IOBuf* ptr);
   void releaseZeroCopyBuf(uint32_t id);
 
+  void releaseIOBuf(
+      std::unique_ptr<folly::IOBuf> buf, ReleaseIOBufCallback* callback);
+
+  ReadCode processZeroCopyRead();
+  ReadCode processNormalRead();
   /**
    * Attempt to enable Observer ByteEvents for this socket.
    *
@@ -1517,8 +1590,8 @@ class AsyncSocket : public AsyncTransport {
   std::unordered_map<uint32_t, folly::IOBuf*> idZeroCopyBufPtrMap_;
   std::unordered_map<folly::IOBuf*, IOBufInfo> idZeroCopyBufInfoMap_;
 
-  StateEnum state_; ///< StateEnum describing current state
-  uint8_t shutdownFlags_; ///< Shutdown state (ShutdownFlags)
+  StateEnum state_{StateEnum::UNINIT}; ///< StateEnum describing current state
+  uint8_t shutdownFlags_{0}; ///< Shutdown state (ShutdownFlags)
   uint16_t eventFlags_; ///< EventBase::HandlerFlags settings
   NetworkSocket fd_; ///< The socket file descriptor
   mutable folly::SocketAddress addr_; ///< The address we tried to connect to
@@ -1545,11 +1618,13 @@ class AsyncSocket : public AsyncTransport {
   WriteRequest* writeReqTail_; ///< End of WriteRequest chain
   std::weak_ptr<ShutdownSocketSet> wShutdownSocketSet_;
   size_t appBytesReceived_; ///< Num of bytes received from socket
-  size_t appBytesWritten_; ///< Num of bytes written to socket
-  size_t rawBytesWritten_; ///< Num of (raw) bytes written to socket
+  size_t appBytesWritten_{0}; ///< Num of bytes written to socket
+  size_t rawBytesWritten_{0}; ///< Num of (raw) bytes written to socket
   // The total num of bytes passed to AsyncSocket's write functions. It doesn't
   // include failed writes, but it does include buffered writes.
   size_t totalAppBytesScheduledForWrite_;
+  // Num of bytes allocated in IOBufs pending write.
+  size_t allocatedBytesBuffered_{0};
 
   // Lifecycle observers.
   //
@@ -1590,6 +1665,10 @@ class AsyncSocket : public AsyncTransport {
   size_t zeroCopyReenableThreshold_{0};
   size_t zeroCopyReenableCounter_{0};
 
+  // zerocopy read
+  bool zerocopyReadDisabled_{false};
+  int zerocopyReadErr_{0};
+
   // subclasses may cache these on first call to get
   mutable std::unique_ptr<const AsyncTransportCertificate> peerCertData_{
       nullptr};
@@ -1603,8 +1682,8 @@ class AsyncSocket : public AsyncTransport {
   // allow other functions to register for callbacks when
   // new AsyncSocket()'s are created
   // must be LAST member defined to ensure other members are initialized
-  // before access; see ConstructorCallback.h for details
-  ConstructorCallback<AsyncSocket> constructorCallback_{this};
+  // before access; see ConstructorCallbackList.h for details
+  ConstructorCallbackList<AsyncSocket> constructorCallbackList_{this};
 };
 
 } // namespace folly

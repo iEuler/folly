@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,6 +88,13 @@ class AtomicNotificationQueue {
   bool push(Args&&... args);
 
   /*
+   * Same as above
+   * but RequestContext is passed from caller
+   */
+  template <typename... Args>
+  bool push(std::shared_ptr<RequestContext> rctx, Args&&... args);
+
+  /*
    * Attempts adding a task into the queue.
    * Can be called from any thread.
    * Similarly to push(), producers are expected to notify
@@ -99,13 +106,15 @@ class AtomicNotificationQueue {
  private:
   struct Node {
     Task task;
-    std::shared_ptr<RequestContext> rctx{RequestContext::saveContext()};
+    std::shared_ptr<RequestContext> rctx;
 
    private:
     friend class AtomicNotificationQueue;
 
     template <typename... Args>
-    explicit Node(Args&&... args) : task(std::forward<Args>(args)...) {}
+    explicit Node(
+        std::shared_ptr<RequestContext> requestContext, Args&&... args)
+        : task(std::forward<Args>(args)...), rctx(std::move(requestContext)) {}
 
     Node* next{};
   };
@@ -190,6 +199,13 @@ class AtomicNotificationQueue {
     bool push(Args&&... args);
 
     /*
+     * Same as above
+     * but RequestContext is passed from caller
+     */
+    template <typename... Args>
+    bool push(std::shared_ptr<RequestContext> rctx, Args&&... args);
+
+    /*
      * Returns true if the queue has tasks.
      * Can be called from any thread.
      */
@@ -212,6 +228,9 @@ class AtomicNotificationQueue {
     Queue arm();
 
    private:
+    template <typename... Args>
+    bool pushImpl(std::shared_ptr<RequestContext> rctx, Args&&... args);
+
     alignas(folly::cacheline_align_v) std::atomic<Node*> head_{};
     static constexpr intptr_t kQueueArmedTag = 1;
   };
@@ -221,7 +240,7 @@ class AtomicNotificationQueue {
   AtomicQueue atomicQueue_;
   Queue queue_;
   std::atomic<ssize_t> taskExecuteCount_{0};
-  int32_t maxReadAtOnce_{10};
+  uint32_t maxReadAtOnce_{10};
 };
 
 /**

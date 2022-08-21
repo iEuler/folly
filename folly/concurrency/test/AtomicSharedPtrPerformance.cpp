@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@
 
 // AtomicSharedPtr-detail.h only works with libstdc++, so skip these tests for
 // other vendors
-#ifdef FOLLY_USE_LIBSTDCPP
+#if defined(__GLIBCXX__)
 
 #include <folly/concurrency/AtomicSharedPtr.h>
 
@@ -236,10 +236,10 @@ int main(int, char**) {
   return 0;
 }
 
-#else // #ifdef FOLLY_USE_LIBSTDCPP
+#else // defined(__GLIBCXX__)
 
 int main(int, char**) {
   return 1;
 }
 
-#endif // #ifdef FOLLY_USE_LIBSTDCPP
+#endif // defined(__GLIBCXX__)

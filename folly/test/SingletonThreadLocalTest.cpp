@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include <folly/SingletonThreadLocal.h>
 #include <folly/String.h>
 #include <folly/Synchronized.h>
+#include <folly/experimental/TestUtil.h>
 #include <folly/experimental/io/FsUtil.h>
 #include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
@@ -46,6 +47,15 @@ struct Foo {
 };
 using FooSingletonTL = SingletonThreadLocal<Foo>;
 } // namespace
+
+TEST(SingletonThreadLocalTest, TryGet) {
+  struct Foo {};
+  using FooTL = SingletonThreadLocal<Foo>;
+  EXPECT_EQ(nullptr, FooTL::try_get());
+  FooTL::get();
+  EXPECT_NE(nullptr, FooTL::try_get());
+  EXPECT_EQ(&FooTL::get(), FooTL::try_get());
+}
 
 TEST(SingletonThreadLocalTest, OneSingletonPerThread) {
   static constexpr std::size_t targetThreadCount{64};
@@ -222,8 +232,9 @@ TEST(SingletonThreadLocalTest, AccessAllThreads) {
 
 #ifndef _WIN32
 TEST(SingletonThreadLocalDeathTest, Overload) {
-  auto exe = fs::executable_path();
-  auto lib = exe.parent_path() / "singleton_thread_local_overload.so";
+  auto const lib = folly::test::find_resource(
+      "folly/test/singleton_thread_local_overload.so");
+
   auto message = stripLeftMargin(R"MESSAGE(
     Overloaded unique instance over <int, DeathTag, ...> with differing trailing arguments:
       folly::SingletonThreadLocal<int, DeathTag, Make1, DeathTag>

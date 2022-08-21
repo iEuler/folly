@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -576,7 +576,9 @@ int fchmod(int fd, mode_t mode) {
       reinterpret_cast<int (*)(int, mode_t)>(dlsym(RTLD_NEXT, "fchmod"));
   // For sanity, make sure we didn't find ourself,
   // since that would cause infinite recursion.
-  CHECK_NE(realFunction, fchmod);
+  CHECK_NE(
+      reinterpret_cast<uintptr_t>(realFunction),
+      reinterpret_cast<uintptr_t>(&fchmod));
 
   if (FChmodFailure::shouldFail()) {
     errno = EINVAL;

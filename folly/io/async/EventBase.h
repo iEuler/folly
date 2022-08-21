@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,11 +64,6 @@ class NotificationQueue;
 namespace detail {
 class EventBaseLocalBase;
 
-class EventBaseLocalBaseBase {
- public:
-  virtual void onEventBaseDestruction(EventBase& evb) = 0;
-  virtual ~EventBaseLocalBaseBase() = default;
-};
 } // namespace detail
 template <typename T>
 class EventBaseLocal;
@@ -403,6 +398,41 @@ class EventBase : public TimeoutManager,
   bool loopOnce(int flags = 0);
 
   /**
+   * Poll the EventBase for active events, run them, then return. Unlike
+   * loopOnce, the expectation is that loopPoll will be called multiple times
+   * State is therefore persisted across calls to reflect that there is ongoing
+   * polling. Control will be returned to the calling thread between iterations.
+   * loopPollSetup and loopPollCleanup manage the maintained state across
+   * loopPoll calls.
+   *
+   * This is useful for callers that want to run the loop manually but under the
+   * context that there is continued polling being done by some thread against
+   * the EventBase.
+   *
+   * Returns the same result as loop().
+   *
+   * Must be called within a corresponding pair of loopPollSetup and
+   * loopPollCleanup; may be called many times within the pair.
+   */
+  bool loopPoll();
+
+  /**
+   * Sets up state for active polling to be done against the EventBase. Call
+   * before polling via subsequent loopPoll calls.
+   *
+   * Must be matched with a corresponding call to loopPoolCleanup.
+   */
+  void loopPollSetup();
+
+  /**
+   * Clears state that was setup for active polling against the EventBase. Call
+   * after polling via loopPoolSetup and the subsequent loopPoll calls.
+   *
+   * Must be matched with a corresponding call to loopPoolSetup.
+   */
+  void loopPollCleanup();
+
+  /**
    * Runs the event loop.
    *
    * loopForever() behaves like loop(), except that it keeps running even if
@@ -632,15 +662,32 @@ class EventBase : public TimeoutManager,
    */
   void runImmediatelyOrRunInEventBaseThreadAndWait(Func fn) noexcept;
 
+  /*
+   * Like runInEventBaseThread, but runs function immediately instead of at the
+   * end of the loop when called from the eventbase thread.
+   */
+  template <typename T>
+  void runImmediatelyOrRunInEventBaseThread(void (*fn)(T*), T* arg) noexcept;
+
+  /*
+   * Like runInEventBaseThread, but runs function immediately instead of at the
+   * end of the loop when called from the eventbase thread.
+   */
+  void runImmediatelyOrRunInEventBaseThread(Func fn) noexcept;
+
   /**
    * Set the maximum desired latency in us and provide a callback which will be
    * called when that latency is exceeded.
    * OBS: This functionality depends on time-measurement.
    */
-  void setMaxLatency(std::chrono::microseconds maxLatency, Func maxLatencyCob) {
+  void setMaxLatency(
+      std::chrono::microseconds maxLatency,
+      Func maxLatencyCob,
+      bool dampen = true) {
     assert(enableTimeMeasurement_);
     maxLatency_ = maxLatency;
     maxLatencyCob_ = std::move(maxLatencyCob);
+    dampenMaxLatency_ = dampen;
   }
 
   /**
@@ -737,7 +784,8 @@ class EventBase : public TimeoutManager,
   class SmoothLoopTime {
    public:
     explicit SmoothLoopTime(std::chrono::microseconds timeInterval)
-        : expCoeff_(-1.0 / timeInterval.count()), value_(0.0) {
+        : expCoeff_(-1.0 / static_cast<double>(timeInterval.count())),
+          value_(0.0) {
       VLOG(11) << "expCoeff_ " << expCoeff_ << " " << __PRETTY_FUNCTION__;
     }
 
@@ -750,8 +798,9 @@ class EventBase : public TimeoutManager,
     double get() const {
       // Add the outstanding buffered times linearly, to avoid
       // expensive exponentiation
-      auto lcoeff = buffer_time_.count() * -expCoeff_;
-      return value_ * (1.0 - lcoeff) + lcoeff * busy_buffer_.count();
+      auto lcoeff = static_cast<double>(buffer_time_.count()) * -expCoeff_;
+      return value_ * (1.0 - lcoeff) +
+          lcoeff * static_cast<double>(busy_buffer_.count());
     }
 
     void dampen(double factor) { value_ *= factor; }
@@ -873,6 +922,10 @@ class EventBase : public TimeoutManager,
 
   bool loopBody(int flags = 0, bool ignoreKeepAlive = false);
 
+  void loopMainSetup();
+  bool loopMain(int flags, bool ignoreKeepAlive);
+  void loopMainCleanup();
+
   void runLoopCallbacks(LoopCallbackList& currentCallbacks);
 
   // executes any callbacks queued by runInLoop(); returns false if none found
@@ -922,6 +975,10 @@ class EventBase : public TimeoutManager,
   // to reduce spamminess
   SmoothLoopTime maxLatencyLoopTime_;
 
+  // If true, max latency callbacks will use a dampened SmoothLoopTime, else
+  // they'll use the raw loop time.
+  bool dampenMaxLatency_ = true;
+
   // callback called when latency limit is exceeded
   Func maxLatencyCob_;
 
@@ -955,7 +1012,9 @@ class EventBase : public TimeoutManager,
   template <typename T>
   friend class EventBaseLocal;
   std::unordered_map<std::size_t, erased_unique_ptr> localStorage_;
-  std::unordered_set<detail::EventBaseLocalBaseBase*> localStorageToDtor_;
+  folly::Synchronized<std::unordered_set<detail::EventBaseLocalBase*>>
+      localStorageToDtor_;
+  bool tryDeregister(detail::EventBaseLocalBase&);
 
   folly::once_flag virtualEventBaseInitFlag_;
   std::unique_ptr<VirtualEventBase> virtualEventBase_;
@@ -984,6 +1043,12 @@ template <typename T>
 void EventBase::runImmediatelyOrRunInEventBaseThreadAndWait(
     void (*fn)(T*), T* arg) noexcept {
   return runImmediatelyOrRunInEventBaseThreadAndWait([=] { fn(arg); });
+}
+
+template <typename T>
+void EventBase::runImmediatelyOrRunInEventBaseThread(
+    void (*fn)(T*), T* arg) noexcept {
+  return runImmediatelyOrRunInEventBaseThread([=] { fn(arg); });
 }
 
 } // namespace folly

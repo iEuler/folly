@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -96,6 +96,7 @@ ElfCache* defaultElfCache() {
 }
 
 void setSymbolizedFrame(
+    ElfCacheBase* const elfCache,
     SymbolizedFrame& frame,
     const std::shared_ptr<ElfFile>& file,
     uintptr_t address,
@@ -113,7 +114,7 @@ void setSymbolizedFrame(
   frame.file = file;
   frame.name = file->getSymbolName(sym);
 
-  Dwarf(file.get())
+  Dwarf(elfCache, file.get())
       .findAddress(address, mode, frame.location, extraInlineFrames);
 }
 
@@ -124,8 +125,13 @@ bool Symbolizer::isAvailable() {
 }
 
 Symbolizer::Symbolizer(
-    ElfCacheBase* cache, LocationInfoMode mode, size_t symbolCacheSize)
-    : cache_(cache ? cache : defaultElfCache()), mode_(mode) {
+    ElfCacheBase* cache,
+    LocationInfoMode mode,
+    size_t symbolCacheSize,
+    std::string exePath)
+    : cache_(cache ? cache : defaultElfCache()),
+      mode_(mode),
+      exePath_(std::move(exePath)) {
   if (symbolCacheSize > 0) {
     symbolCache_.emplace(folly::in_place, symbolCacheSize);
   }
@@ -136,7 +142,14 @@ size_t Symbolizer::symbolize(
     folly::Range<SymbolizedFrame*> frames) {
   size_t addrCount = addrs.size();
   size_t frameCount = frames.size();
-  FOLLY_SAFE_CHECK(addrCount <= frameCount, "Not enough frames.");
+  if (addrCount > frameCount) {
+    FOLLY_SAFE_DFATAL(
+        "Not enough frames: addrCount: ",
+        addrCount,
+        " frameCount: ",
+        frameCount);
+    return 0;
+  }
   size_t remaining = addrCount;
 
   auto const dbg = detail::get_r_debug();
@@ -149,7 +162,7 @@ size_t Symbolizer::symbolize(
 
   char selfPath[PATH_MAX + 8];
   ssize_t selfSize;
-  if ((selfSize = readlink("/proc/self/exe", selfPath, PATH_MAX + 1)) == -1) {
+  if ((selfSize = readlink(exePath_.c_str(), selfPath, PATH_MAX + 1)) == -1) {
     // Something has gone terribly wrong.
     return 0;
   }
@@ -176,7 +189,6 @@ size_t Symbolizer::symbolize(
     // behavior appears to be documented, so checking for the empty string is
     // as good as anything.
     auto const objPath = lmap->l_name[0] != '\0' ? lmap->l_name : selfPath;
-
     auto const elfFile = cache_->getFile(objPath);
     if (!elfFile) {
       continue;
@@ -226,14 +238,15 @@ size_t Symbolizer::symbolize(
         if (mode_ == LocationInfoMode::FULL_WITH_INLINE &&
             frameCount > addrCount) {
           size_t maxInline = std::min<size_t>(
-              Dwarf::kMaxInlineLocationInfoPerFrame, frameCount - addrCount);
+              kMaxInlineLocationInfoPerFrame, frameCount - addrCount);
           // First use the trailing empty frames (index starting from addrCount)
           // to get the inline call stack, then rotate these inline functions
           // before the caller at `frame[i]`.
           folly::Range<SymbolizedFrame*> inlineFrameRange(
               frames.begin() + addrCount,
               frames.begin() + addrCount + maxInline);
-          setSymbolizedFrame(frame, elfFile, adjusted, mode_, inlineFrameRange);
+          setSymbolizedFrame(
+              cache_, frame, elfFile, adjusted, mode_, inlineFrameRange);
 
           numInlined = countFrames(inlineFrameRange);
           // Rotate inline frames right before its caller frame.
@@ -243,7 +256,7 @@ size_t Symbolizer::symbolize(
               frames.begin() + addrCount + numInlined);
           addrCount += numInlined;
         } else {
-          setSymbolizedFrame(frame, elfFile, adjusted, mode_);
+          setSymbolizedFrame(cache_, frame, elfFile, adjusted, mode_);
         }
         --remaining;
         if (symbolCache_) {
@@ -395,14 +408,15 @@ void SafeStackTracePrinter::printStackTrace(bool symbolize) {
   }
 }
 
-std::string getAsyncStackTraceStr() {
 #if FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
+namespace {
+constexpr size_t kMaxStackTraceDepth = 100;
 
-  // Get and symbolize stack trace
-  constexpr size_t kMaxStackTraceDepth = 100;
-  FrameArray<kMaxStackTraceDepth> addresses;
+template <size_t N, typename StackTraceFunc>
+std::string getStackTraceStrImpl(StackTraceFunc func) {
+  FrameArray<N> addresses;
 
-  if (!getAsyncStackTraceSafe(addresses)) {
+  if (!func(addresses)) {
     return "";
   } else {
     ElfCache elfCache;
@@ -413,13 +427,19 @@ std::string getAsyncStackTraceStr() {
     printer.println(addresses);
     return printer.str();
   }
-
-#else
-
-  return "";
-
-#endif // FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
 }
+} // namespace
+
+std::string getStackTraceStr() {
+  return getStackTraceStrImpl<kMaxStackTraceDepth>(
+      getStackTrace<kMaxStackTraceDepth>);
+}
+
+std::string getAsyncStackTraceStr() {
+  return getStackTraceStrImpl<kMaxStackTraceDepth>(
+      getAsyncStackTraceSafe<kMaxStackTraceDepth>);
+}
+#endif // FOLLY_HAVE_ELF && FOLLY_HAVE_DWARF
 
 #if FOLLY_HAVE_SWAPCONTEXT
 

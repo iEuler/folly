@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,31 +15,34 @@
  */
 
 /**
- *
- * This file provides a generic interface for converting objects to and from
+ * Conv provides the ubiquitous method `to<TargetType>(source)`, along with
+ * a few other generic interfaces for converting objects to and from
  * string-like types (std::string, fbstring, StringPiece), as well as
  * range-checked conversions between numeric and enum types. The mechanisms are
  * extensible, so that user-specified types can add folly::to support.
  *
+ *     folly::to<std::string>(123)
+ *     // "123"
+ *
  *******************************************************************************
- * TYPE -> STRING CONVERSIONS
+ * ## TYPE -> STRING CONVERSIONS
  *******************************************************************************
- * You can call the to<std::string> or to<fbstring>. These are variadic
+ * You can call the `to<std::string>` or `to<fbstring>`. These are variadic
  * functions that convert their arguments to strings, and concatenate them to
  * form a result. So, for example,
  *
- * auto str = to<std::string>(123, "456", 789);
+ *     auto str = to<std::string>(123, "456", 789);
  *
- * Sets str to "123456789".
+ * Sets str to `"123456789"`.
  *
  * In addition to just concatenating the arguments, related functions can
- * delimit them with some string: toDelim<std::string>(",", "123", 456, "789")
- * will return the string "123,456,789".
+ * delimit them with some string: `toDelim<std::string>(",", "123", 456, "789")`
+ * will return the string `"123,456,789"`.
  *
  * toAppend does not return a string; instead, it takes a pointer to a string as
  * its last argument, and appends the result of the concatenation into it:
- * std::string str = "123";
- * toAppend(456, "789", &str); // Now str is "123456789".
+ *     std::string str = "123";
+ *     toAppend(456, "789", &str); // Now str is "123456789".
  *
  * The toAppendFit function acts like toAppend, but it precalculates the size
  * required to perform the append operation, and reserves that space in the
@@ -52,49 +55,51 @@
  * and toAppendDelimFit are defined, with the obvious semantics.
  *
  *******************************************************************************
- * STRING -> TYPE CONVERSIONS
+ * ## STRING -> TYPE CONVERSIONS
  *******************************************************************************
  * Going in the other direction, and parsing a string into a C++ type, is also
  * supported:
- * to<int>("123"); // Returns 123.
+ *     to<int>("123"); // Returns 123.
  *
- * Out of range (e.g. to<std::uint8_t>("1000")), or invalidly formatted (e.g.
- * to<int>("four")) inputs will throw. If throw-on-error is undesirable (for
+ * Out of range (e.g. `to<std::uint8_t>("1000")`), or invalidly formatted (e.g.
+ * `to<int>("four")`) inputs will throw. If throw-on-error is undesirable (for
  * instance: you're dealing with untrusted input, and want to protect yourself
  * from users sending you down a very slow exception-throwing path), you can use
- * tryTo<T>, which will return an Expected<T, ConversionCode>.
+ * `tryTo<T>`, which will return an `Expected<T, ConversionCode>`.
  *
- * There are overloads of to() and tryTo() that take a StringPiece*. These parse
- * out a type from the beginning of a string, and modify the passed-in
+ * There are overloads of to() and tryTo() that take a `StringPiece*`. These
+ * parse out a type from the beginning of a string, and modify the passed-in
  * StringPiece to indicate the portion of the string not consumed.
  *
  *******************************************************************************
- * NUMERIC / ENUM CONVERSIONS
+ * ## NUMERIC / ENUM CONVERSIONS
  *******************************************************************************
- * Conv also supports a to<T>(S) overload, where T and S are numeric or enum
+ * Conv also supports a `to<T>(S)` overload, where T and S are numeric or enum
  * types, that checks to see that the target type can represent its argument,
- * and will throw if it cannot. This includes cases where a floating point ->
+ * and will throw if it cannot. This includes cases where a floating point to
  * integral conversion is attempted on a value with a non-zero fractional
- * component, and integral -> floating point conversions that would lose
+ * component, and integral to floating point conversions that would lose
  * precision. Enum conversions are range-checked for the underlying type of the
  * enum, but there is no check that the input value is a valid choice of enum
  * value.
  *
  *******************************************************************************
- * CUSTOM TYPE CONVERSIONS
+ * ## CUSTOM TYPE CONVERSIONS
  *******************************************************************************
  * Users may customize the string conversion functionality for their own data
- * types, . The key functions you should implement are:
- * // Two functions to allow conversion to your type from a string.
- * Expected<StringPiece, ConversionCode> parseTo(folly::StringPiece in,
- *     YourType& out);
- * YourErrorType makeConversionError(YourErrorType in, StringPiece in);
- * // Two functions to allow conversion from your type to a string.
- * template <class String>
- * void toAppend(const YourType& in, String* out);
- * size_t estimateSpaceNeeded(const YourType& in);
+ * types. The key functions you should implement are:
+ *     // Two functions to allow conversion to your type from a string.
+ *     Expected<StringPiece, ConversionCode> parseTo(folly::StringPiece in,
+ *         YourType& out);
+ *     YourErrorType makeConversionError(YourErrorType in, StringPiece in);
+ *     // Two functions to allow conversion from your type to a string.
+ *     template <class String>
+ *   void toAppend(const YourType& in, String* out);
+ *       size_t estimateSpaceNeeded(const YourType& in);
  *
  * These are documented below, inline.
+ *
+ * @file Conv.h
  */
 
 #pragma once
@@ -103,6 +108,7 @@
 #include <cassert>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -113,10 +119,12 @@
 
 #include <double-conversion/double-conversion.h> // V8 JavaScript implementation
 
+#include <folly/CPortability.h>
 #include <folly/Demangle.h>
 #include <folly/Expected.h>
 #include <folly/FBString.h>
 #include <folly/Likely.h>
+#include <folly/Portability.h>
 #include <folly/Range.h>
 #include <folly/Traits.h>
 #include <folly/Unit.h>
@@ -147,11 +155,11 @@ enum class ConversionCode : unsigned char {
   NUM_ERROR_CODES, // has to be the last entry
 };
 
-struct ConversionErrorBase : std::range_error {
+struct FOLLY_EXPORT ConversionErrorBase : std::range_error {
   using std::range_error::range_error;
 };
 
-class ConversionError : public ConversionErrorBase {
+class FOLLY_EXPORT ConversionError : public ConversionErrorBase {
  public:
   ConversionError(const std::string& str, ConversionCode code)
       : ConversionErrorBase(str), code_(code) {}
@@ -165,7 +173,7 @@ class ConversionError : public ConversionErrorBase {
   ConversionCode code_;
 };
 
-/*******************************************************************************
+/**
  * Custom Error Translation
  *
  * Your overloaded parseTo() function can return a custom error code on failure.
@@ -185,7 +193,7 @@ class ConversionError : public ConversionErrorBase {
  *   ...
  *   return YourConversionError(messageString);
  * }
- ******************************************************************************/
+ */
 ConversionError makeConversionError(ConversionCode code, StringPiece input);
 
 namespace detail {
@@ -213,6 +221,8 @@ inline void enforceWhitespace(StringPiece sp) {
 } // namespace detail
 
 /**
+ * @overloadbrief to, but return an Expected
+ *
  * The identity conversion function.
  * tryTo<T>(T) returns itself for all types T.
  */
@@ -224,6 +234,9 @@ tryTo(Src&& value) {
   return std::forward<Src>(value);
 }
 
+/**
+ * @overloadbrief Convert from one type to another.
+ */
 template <class Tgt, class Src>
 typename std::enable_if<
     std::is_same<Tgt, typename std::decay<Src>::type>::value,
@@ -232,9 +245,9 @@ to(Src&& value) {
   return std::forward<Src>(value);
 }
 
-/*******************************************************************************
+/**
  * Arithmetic to boolean
- ******************************************************************************/
+ */
 
 /**
  * Unchecked conversion from arithmetic to boolean. This is different from the
@@ -259,9 +272,9 @@ to(const Src& value) {
   return value != Src();
 }
 
-/*******************************************************************************
+/**
  * Anything to string
- ******************************************************************************/
+ */
 
 namespace detail {
 
@@ -318,9 +331,9 @@ struct LastElement : std::decay<decltype(LastElementImpl<Ts...>::call(
 
 } // namespace detail
 
-/*******************************************************************************
+/**
  * Conversions from integral types to string types.
- ******************************************************************************/
+ */
 
 #if FOLLY_HAVE_INT128_T
 namespace detail {
@@ -367,6 +380,8 @@ inline size_t unsafeTelescope128(
 #endif
 
 /**
+ * @overloadbrief Appends conversion to string.
+ *
  * A single char gets appended.
  */
 template <class Tgt>
@@ -374,6 +389,10 @@ void toAppend(char value, Tgt* result) {
   *result += value;
 }
 
+/**
+ * @overloadbrief Estimates the number of characters in a value's string
+ * representation.
+ */
 template <class T>
 constexpr typename std::enable_if<std::is_same<T, char>::value, size_t>::type
 estimateSpaceNeeded(T) {
@@ -611,16 +630,16 @@ estimateSpaceNeeded(Src value) {
   return estimateSpaceNeeded(to_underlying(value));
 }
 
-/*******************************************************************************
+/**
  * Conversions from floating-point types to string types.
- ******************************************************************************/
+ */
 
 namespace detail {
 constexpr int kConvMaxDecimalInShortestLow = -6;
 constexpr int kConvMaxDecimalInShortestHigh = 21;
 } // namespace detail
 
-/** Wrapper around DoubleToStringConverter **/
+/** Wrapper around DoubleToStringConverter */
 template <class Tgt, class Src>
 typename std::enable_if<
     std::is_floating_point<Src>::value && IsSomeString<Tgt>::value>::type
@@ -641,6 +660,8 @@ toAppend(
       1); // max trailing padding zeros
   char buffer[256];
   StringBuilder builder(buffer, sizeof(buffer));
+  FOLLY_PUSH_WARNING
+  FOLLY_CLANG_DISABLE_WARNING("-Wcovered-switch-default")
   switch (mode) {
     case DoubleToStringConverter::SHORTEST:
       conv.ToShortest(value, &builder);
@@ -657,6 +678,7 @@ toAppend(
       conv.ToPrecision(value, int(numDigits), &builder);
       break;
   }
+  FOLLY_POP_WARNING
   const size_t length = size_t(builder.position());
   builder.Finalize();
   result->append(buffer, length);
@@ -727,6 +749,7 @@ estimateSpaceNeeded(const Src&) {
   return sizeof(Src) + 1; // dumbest best effort ever?
 }
 
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
 namespace detail {
 
 template <class Tgt>
@@ -788,12 +811,13 @@ typename std::enable_if<
 toAppendDelimStrImpl(const Delimiter& delim, const T& v, const Ts&... vs) {
   // we are really careful here, calling toAppend with just one element does
   // not try to estimate space needed (as we already did that). If we call
-  // toAppend(v, delim, ....) we would do unnecesary size calculation
+  // toAppend(v, delim, ....) we would do unnecessary size calculation
   toAppend(v, detail::getLastElement(vs...));
   toAppend(delim, detail::getLastElement(vs...));
   toAppendDelimStrImpl(delim, vs...);
 }
 } // namespace detail
+#endif
 
 /**
  * Variadic conversion to string. Appends each element in turn.
@@ -837,7 +861,9 @@ void toAppend(const pid_t a, Tgt* res) {
 #endif
 
 /**
- * Special version of the call that preallocates exaclty as much memory
+ * @overloadbrief toAppend, but pre-allocate the exact amount of space required.
+ *
+ * Special version of the call that preallocates exactly as much memory
  * as need for arguments to be stored in target. This means we are
  * not doing exponential growth when we append. If you are using it
  * in a loop you are aiming at your foot with a big perf-destroying
@@ -864,6 +890,8 @@ typename std::enable_if<IsSomeString<Tgt>::value>::type toAppend(
     Tgt* /* result */) {}
 
 /**
+ * @overloadbrief Use a specified delimiter between appendees.
+ *
  * Variadic base case: do nothing.
  */
 template <class Delimiter, class Tgt>
@@ -893,6 +921,8 @@ toAppendDelim(const Delimiter& delim, const Ts&... vs) {
 }
 
 /**
+ * @overloadbrief toAppend with custom delimiter and exact pre-allocation.
+ *
  * Detail in comment for toAppendFit
  */
 template <class Delimiter, class... Ts>
@@ -945,6 +975,8 @@ to(Src value) {
 }
 
 /**
+ * @overloadbrief Like `to`, but uses a custom delimiter.
+ *
  * toDelim<SomeString>(SomeString str) returns itself.
  */
 template <class Tgt, class Delim, class Src>
@@ -973,9 +1005,9 @@ toDelim(const Delim& delim, const Ts&... vs) {
   return result;
 }
 
-/*******************************************************************************
+/**
  * Conversions from string types to integral types.
- ******************************************************************************/
+ */
 
 namespace detail {
 
@@ -1112,9 +1144,9 @@ to(const char* b, const char* e) {
       });
 }
 
-/*******************************************************************************
+/**
  * Conversions from string types to arithmetic types.
- ******************************************************************************/
+ */
 
 /**
  * Parsing strings to numeric types.
@@ -1128,9 +1160,9 @@ parseTo(StringPiece src, Tgt& out) {
       [&](Tgt res) { return void(out = res), src; });
 }
 
-/*******************************************************************************
+/**
  * Integral / Floating Point to integral / Floating Point
- ******************************************************************************/
+ */
 
 namespace detail {
 
@@ -1186,6 +1218,9 @@ typename std::enable_if<
         !std::is_same<Tgt, Src>::value,
     Expected<Tgt, ConversionCode>>::type
 convertTo(const Src& value) noexcept {
+  if (FOLLY_UNLIKELY(std::isinf(value))) {
+    return static_cast<Tgt>(value);
+  }
   if /* constexpr */ (
       std::numeric_limits<Tgt>::max() < std::numeric_limits<Src>::max()) {
     if (value > std::numeric_limits<Tgt>::max()) {
@@ -1210,8 +1245,10 @@ inline typename std::enable_if<
 checkConversion(const Src& value) {
   constexpr Src tgtMaxAsSrc = static_cast<Src>(std::numeric_limits<Tgt>::max());
   constexpr Src tgtMinAsSrc = static_cast<Src>(std::numeric_limits<Tgt>::min());
-  if (value >= tgtMaxAsSrc) {
-    if (value > tgtMaxAsSrc) {
+  // NOTE: The following two comparisons also handle the case where value is
+  // NaN, as all comparisons with NaN are false.
+  if (!(value < tgtMaxAsSrc)) {
+    if (!(value <= tgtMaxAsSrc)) {
       return false;
     }
     const Src mmax = folly::nextafter(tgtMaxAsSrc, Src());
@@ -1219,7 +1256,7 @@ checkConversion(const Src& value) {
         std::numeric_limits<Tgt>::max() - static_cast<Tgt>(mmax)) {
       return false;
     }
-  } else if (is_signed_v<Tgt> && value <= tgtMinAsSrc) {
+  } else if (value <= tgtMinAsSrc) {
     if (value < tgtMinAsSrc) {
       return false;
     }
@@ -1306,7 +1343,7 @@ typename std::enable_if<detail::IsArithToArith<Tgt, Src>::value, Tgt>::type to(
       });
 }
 
-/*******************************************************************************
+/**
  * Custom Conversions
  *
  * Any type can be used with folly::to by implementing parseTo. The
@@ -1317,7 +1354,7 @@ typename std::enable_if<detail::IsArithToArith<Tgt, Src>::value, Tgt>::type to(
  * ::folly::Expected<::folly::StringPiece, SomeErrorCode>
  *   parseTo(::folly::StringPiece, OtherType&) noexcept;
  * }
- ******************************************************************************/
+ */
 template <class T>
 FOLLY_NODISCARD typename std::enable_if<
     std::is_enum<T>::value,
@@ -1478,7 +1515,7 @@ inline
 /**
  * tryTo/to that take the strings by pointer so the caller gets information
  * about how much of the string was consumed by the conversion. These do not
- * check for trailing whitepsace.
+ * check for trailing whitespace.
  */
 template <class Tgt>
 Expected<Tgt, detail::ParseToError<Tgt>> tryTo(StringPiece* src) {
@@ -1502,9 +1539,9 @@ Tgt to(StringPiece* src) {
           [=](Error e) { return makeConversionError(e, *src); });
 }
 
-/*******************************************************************************
+/**
  * Enum to anything and back
- ******************************************************************************/
+ */
 
 template <class Tgt, class Src>
 typename std::enable_if<

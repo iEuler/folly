@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,14 +37,16 @@
 #include <folly/Exception.h>
 #include <folly/ScopeGuard.h>
 #include <folly/String.h>
-#include <folly/detail/AtFork.h>
 #include <folly/io/Cursor.h>
 #include <folly/lang/Assume.h>
 #include <folly/logging/xlog.h>
+#include <folly/portability/Dirent.h>
+#include <folly/portability/Fcntl.h>
 #include <folly/portability/Sockets.h>
 #include <folly/portability/Stdlib.h>
 #include <folly/portability/SysSyscall.h>
 #include <folly/portability/Unistd.h>
+#include <folly/system/AtFork.h>
 #include <folly/system/Shell.h>
 
 constexpr int kExecFailure = 127;
@@ -447,12 +449,12 @@ void Subprocess::spawnInternal(
     if (options.detach_) {
       // If we are detaching we must use fork() instead of vfork() for the first
       // fork, since we aren't going to simply call exec() in the child.
-      pid = detail::AtFork::forkInstrumented(fork);
+      pid = AtFork::forkInstrumented(fork);
     } else {
       if (kIsSanitizeThread) {
         // TSAN treats vfork as fork, so use the instrumented version
         // instead
-        pid = detail::AtFork::forkInstrumented(fork);
+        pid = AtFork::forkInstrumented(fork);
       } else {
         pid = vfork();
       }
@@ -473,7 +475,7 @@ void Subprocess::spawnInternal(
         if (kIsSanitizeThread) {
           // TSAN treats vfork as fork, so use the instrumented version
           // instead
-          pid = detail::AtFork::forkInstrumented(fork);
+          pid = AtFork::forkInstrumented(fork);
         } else {
           pid = vfork();
         }
@@ -515,6 +517,67 @@ void Subprocess::spawnInternal(
 }
 FOLLY_POP_WARNING
 
+// If requested, close all other file descriptors.  Don't close
+// any fds in options.fdActions_, and don't touch stdin, stdout, stderr.
+// Ignore errors.
+//
+//
+// This function is called in the child after fork but before exec so
+// there is very little it can do. It cannot allocate memory and
+// it cannot lock a mutex, just as if it were running in a signal
+// handler.
+void Subprocess::closeInheritedFds(const Options::FdMap& fdActions) {
+#if defined(__linux__)
+  int dirfd = open("/proc/self/fd", O_RDONLY);
+  if (dirfd != -1) {
+    char buffer[32768];
+    int res;
+    while ((res = syscall(SYS_getdents64, dirfd, buffer, sizeof(buffer))) > 0) {
+      // linux_dirent64 is part of the kernel ABI for the getdents64 system
+      // call. It is currently the same as struct dirent64 in both glibc and
+      // musl, but those are library specific and could change. linux_dirent64
+      // is not defined in the standard set of Linux userspace headers
+      // (/usr/include/linux)
+      //
+      // We do not use the POSIX interfaces (opendir, readdir, etc..) for
+      // reading a directory since they may allocate memory / grab a lock, which
+      // is unsafe in this context.
+      struct linux_dirent64 {
+        uint64_t d_ino;
+        int64_t d_off;
+        uint16_t d_reclen;
+        unsigned char d_type;
+        char d_name[0];
+      } const* entry;
+      for (int offset = 0; offset < res; offset += entry->d_reclen) {
+        entry = reinterpret_cast<struct linux_dirent64*>(buffer + offset);
+        if (entry->d_type != DT_LNK) {
+          continue;
+        }
+        char* end_p = nullptr;
+        errno = 0;
+        int fd = static_cast<int>(::strtol(entry->d_name, &end_p, 10));
+        if (errno == ERANGE || fd < 3 || end_p == entry->d_name) {
+          continue;
+        }
+        if ((fd != dirfd) && (fdActions.count(fd) == 0)) {
+          ::close(fd);
+        }
+      }
+    }
+    ::close(dirfd);
+    return;
+  }
+#endif
+  // If not running on Linux or if we failed to open /proc/self/fd, try to close
+  // all possible open file descriptors.
+  for (int fd = sysconf(_SC_OPEN_MAX) - 1; fd >= 3; --fd) {
+    if (fdActions.count(fd) == 0) {
+      ::close(fd);
+    }
+  }
+}
+
 int Subprocess::prepareChild(
     const Options& options,
     const sigset_t* sigmask,
@@ -540,16 +603,35 @@ int Subprocess::prepareChild(
     }
   }
 
+#ifdef __linux__
+  // Best effort
+  if (options.cpuSet_.hasValue()) {
+    const auto& cpuSet = options.cpuSet_.value();
+    ::sched_setaffinity(0, sizeof(cpuSet), &cpuSet);
+  }
+#endif
+
   // We don't have to explicitly close the parent's end of all pipes,
   // as they all have the FD_CLOEXEC flag set and will be closed at
   // exec time.
 
-  // Close all fds that we're supposed to close.
+  // Redirect requested FDs to /dev/null or NUL
+  // dup2 any explicitly specified FDs
   for (auto& p : options.fdActions_) {
-    if (p.second == CLOSE) {
-      if (::close(p.first) == -1) {
+    if (p.second == DEV_NULL) {
+      // folly/portability/Fcntl provides an impl of open that will
+      // map this to NUL on Windows.
+      auto devNull = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+      if (devNull == -1) {
         return errno;
       }
+      // note: dup2 will not set CLOEXEC on the destination
+      if (::dup2(devNull, p.first) == -1) {
+        // explicit close on error to avoid leaking fds
+        ::close(devNull);
+        return errno;
+      }
+      ::close(devNull);
     } else if (p.second != p.first) {
       if (::dup2(p.second, p.first) == -1) {
         return errno;
@@ -557,15 +639,8 @@ int Subprocess::prepareChild(
     }
   }
 
-  // If requested, close all other file descriptors.  Don't close
-  // any fds in options.fdActions_, and don't touch stdin, stdout, stderr.
-  // Ignore errors.
   if (options.closeOtherFds_) {
-    for (int fd = sysconf(_SC_OPEN_MAX) - 1; fd >= 3; --fd) {
-      if (options.fdActions_.count(fd) == 0) {
-        ::close(fd);
-      }
-    }
+    closeInheritedFds(options.fdActions_);
   }
 
 #if defined(__linux__)
@@ -966,7 +1041,6 @@ void Subprocess::communicate(
 
       if ((events & (POLLHUP | POLLERR)) && !closed) {
         toClose.push_back(i);
-        closed = true;
       }
     }
 

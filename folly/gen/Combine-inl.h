@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -116,7 +116,7 @@ class Zip : public Operator<Zip<Container>> {
     template <class Handler>
     bool apply(Handler&& handler) const {
       auto iter = container_->begin();
-      return (source_.apply([&](Value value) -> bool {
+      return source_.apply([&](Value value) -> bool {
         if (iter == container_->end()) {
           return false;
         }
@@ -126,7 +126,7 @@ class Zip : public Operator<Zip<Container>> {
         }
         ++iter;
         return true;
-      }));
+      });
     }
   };
 

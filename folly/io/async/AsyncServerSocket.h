@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -140,7 +140,11 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
 
   class AcceptCallback {
    public:
-    virtual ~AcceptCallback() = default;
+    struct AcceptInfo {
+      std::chrono::steady_clock::time_point timeBeforeEnqueue;
+    };
+
+    virtual ~AcceptCallback();
 
     /**
      * connectionAccepted() is called whenever a new client connection is
@@ -157,9 +161,14 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
      * @param clientAddr  A reference to a SocketAddress struct containing the
      *                    client's address.  This struct is only guaranteed to
      *                    remain valid until connectionAccepted() returns.
+     * @param info        A simple structure that contains auxiliary information
+     *                    about this accepted socket, for example, when it's
+     *                    getting pushed into the waiting queue.
      */
     virtual void connectionAccepted(
-        NetworkSocket fd, const SocketAddress& clientAddr) noexcept = 0;
+        NetworkSocket fd,
+        const SocketAddress& clientAddr,
+        AcceptInfo info) noexcept = 0;
 
     /**
      * acceptError() is called if an error occurs while accepting.
@@ -634,6 +643,13 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
   bool getTosReflect() { return tosReflect_; }
 
   /**
+   * Set/Get default TOS for listener socket
+   */
+  void setListenerTos(uint32_t tos);
+
+  uint32_t getListenerTos() const { return listenerTos_; }
+
+  /**
    * Get the number of connections dropped by the AsyncServerSocket
    */
   std::size_t getNumDroppedConnections() const {
@@ -782,6 +798,7 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
     NetworkSocket fd;
     SocketAddress clientAddr;
     std::chrono::steady_clock::time_point deadline;
+    std::chrono::steady_clock::time_point timeBeforeEnqueue;
 
     bool isExpired() const {
       return deadline.time_since_epoch().count() != 0 &&
@@ -956,6 +973,7 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
   std::weak_ptr<ShutdownSocketSet> wShutdownSocketSet_;
   ConnectionEventCallback* connectionEventCallback_{nullptr};
   bool tosReflect_{false};
+  uint32_t listenerTos_{0};
   bool zeroCopyVal_{false};
   folly::observer::AtomicObserver<std::chrono::nanoseconds> queueTimeout_{
       folly::observer::makeStaticObserver(std::chrono::nanoseconds::zero())};

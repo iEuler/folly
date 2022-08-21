@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,12 +26,20 @@ namespace folly {
  * Generic interface applications may implement to convey self or peer
  * certificate related information.
  */
-class OpenSSLTransportCertificate : public AsyncTransportCertificate {
+class OpenSSLTransportCertificate : virtual public AsyncTransportCertificate {
  public:
-  virtual ~OpenSSLTransportCertificate() = default;
+  virtual ~OpenSSLTransportCertificate() override = default;
 
-  // TODO: Once all callsites using getX509() perform dynamic casts to this
-  // OpenSSLTransportCertificate type, we can move that method to be declared
-  // here instead.
+  /**
+   * Returns an X509 structure associated with this Certificate. This may be
+   * null.
+   */
+  virtual folly::ssl::X509UniquePtr getX509() const = 0;
+
+  static ssl::X509UniquePtr tryExtractX509(
+      const AsyncTransportCertificate* cert) {
+    auto opensslCert = dynamic_cast<const OpenSSLTransportCertificate*>(cert);
+    return opensslCert ? opensslCert->getX509() : nullptr;
+  }
 };
 } // namespace folly

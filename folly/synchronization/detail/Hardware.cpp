@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 
 #include <boost/preprocessor/repetition/repeat.hpp>
 
+#include <folly/CppAttributes.h>
 #include <folly/lang/Assume.h>
 #include <folly/lang/Exception.h>
 
@@ -119,7 +120,8 @@ FOLLY_RTM_DISABLED_NORETURN static bool rtmTestFunc() {
 #endif
 }
 
-[[noreturn]] FOLLY_DISABLE_SANITIZERS static void rtmAbortFunc(uint8_t status) {
+[[noreturn]] FOLLY_DISABLE_SANITIZERS static void rtmAbortFunc(
+    FOLLY_MAYBE_UNUSED uint8_t status) {
 #if FOLLY_RTM_SUPPORT
   switch (status) {
 #define FOLLY_RTM_ABORT_ONE(z, n, text) \

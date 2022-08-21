@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1557,6 +1557,8 @@ void testContainsWithPrecomputedHash() {
   const auto otherKey{2};
   const auto hashTokenNotFound = m.prehash(otherKey);
   EXPECT_FALSE(m.contains(hashTokenNotFound, otherKey));
+  m.prefetch(hashToken);
+  m.prefetch(hashTokenNotFound);
 }
 
 TEST(F14Set, containsWithPrecomputedHash) {

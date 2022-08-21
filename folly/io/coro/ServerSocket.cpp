@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,8 @@ class AcceptCallback : public folly::AsyncServerSocket::AcceptCallback {
 
   void connectionAccepted(
       folly::NetworkSocket fdNetworkSocket,
-      const folly::SocketAddress& clientAddr) noexcept override {
+      const folly::SocketAddress& clientAddr,
+      AcceptInfo /* info */) noexcept override {
     VLOG(5) << "Connection accepted from: " << clientAddr.describe();
     // unregister handlers while in the callback
     socket_->pauseAccepting();
@@ -104,13 +105,14 @@ Task<std::unique_ptr<Transport>> ServerSocket::accept() {
   socket_->addAcceptCallback(&cb, nullptr);
   socket_->startAccepting();
   auto cancelToken = co_await folly::coro::co_current_cancellation_token;
-  CancellationCallback cancellationCallback{cancelToken, [&baton, this] {
-                                              this->socket_->stopAccepting();
-                                              baton.post();
-                                            }};
+  CancellationCallback cancellationCallback{
+      cancelToken, [&baton] { baton.post(); }};
 
   co_await baton;
-  co_await folly::coro::co_safe_point;
+  if (cancelToken.isCancellationRequested()) {
+    socket_->stopAccepting();
+    co_yield co_cancelled;
+  }
   if (cb.error) {
     co_yield co_error(std::move(cb.error));
   }

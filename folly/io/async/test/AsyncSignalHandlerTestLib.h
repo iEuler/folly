@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ class AsyncSignalHandlerTest : public ::testing::Test {
   AsyncSignalHandlerTest() = default;
 };
 
-TYPED_TEST_CASE_P(AsyncSignalHandlerTest);
+TYPED_TEST_SUITE_P(AsyncSignalHandlerTest);
 
 TYPED_TEST_P(AsyncSignalHandlerTest, basic) {
   FOLLY_SKIP_IF_NULLPTR_BACKEND(evb);
@@ -88,6 +88,6 @@ TYPED_TEST_P(AsyncSignalHandlerTest, attachEventBase) {
   EXPECT_FALSE(handler.getEventBase());
 }
 
-REGISTER_TYPED_TEST_CASE_P(AsyncSignalHandlerTest, basic, attachEventBase);
+REGISTER_TYPED_TEST_SUITE_P(AsyncSignalHandlerTest, basic, attachEventBase);
 } // namespace test
 } // namespace folly

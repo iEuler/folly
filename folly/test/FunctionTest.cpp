@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,79 @@
 
 #include <array>
 #include <cstdarg>
+#include <functional>
 
 #include <folly/Memory.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
 
 using folly::Function;
+
+extern "C" FOLLY_KEEP void check_folly_function_move(void* src, void* dst) {
+  new (dst) Function<void()>(std::move(*static_cast<Function<void()>*>(src)));
+}
+
+extern "C" FOLLY_KEEP void check_folly_function_nuke(void* fun) {
+  static_cast<Function<void()>*>(fun)->~Function();
+}
+
+template <bool Triv, bool NxCopy>
+struct check_invocable_base;
+template <bool NxCopy>
+struct check_invocable_base<false, NxCopy> {
+  FOLLY_NOINLINE check_invocable_base(check_invocable_base const&) noexcept(
+      NxCopy) {}
+  void operator=(check_invocable_base const&) = delete;
+  FOLLY_NOINLINE ~check_invocable_base() {}
+};
+template <>
+struct check_invocable_base<true, true> {};
+template <bool Triv, bool NxCopy, size_t Size, size_t Align>
+struct check_invocable : check_invocable_base<Triv, NxCopy> {
+  std::aligned_storage_t<Size, Align> storage;
+  using check_invocable_base<Triv, NxCopy>::check_invocable_base;
+  void operator()() const noexcept {}
+};
+
+extern "C" FOLLY_KEEP void check_folly_function_make_in_situ_trivial(
+    void* fun, void* obj) {
+  constexpr auto size = 6 * sizeof(void*);
+  constexpr auto align = folly::max_align_v;
+  using inv_t = check_invocable<true, true, size, align>;
+  static_assert(std::is_trivially_copyable_v<inv_t>);
+  auto& inv = *static_cast<inv_t*>(obj);
+  ::new (fun) Function<void()>(inv);
+}
+
+extern "C" FOLLY_KEEP void check_folly_function_make_in_situ_default(
+    void* fun, void* obj) {
+  constexpr auto size = 6 * sizeof(void*);
+  constexpr auto align = folly::max_align_v;
+  using inv_t = check_invocable<false, true, size, align>;
+  static_assert(!std::is_trivially_copyable_v<inv_t>);
+  auto& inv = *static_cast<inv_t*>(obj);
+  ::new (fun) Function<void()>(inv);
+}
+
+extern "C" FOLLY_KEEP void check_folly_function_make_on_heap_trivial(
+    void* fun, void* obj) {
+  constexpr auto size = 12 * sizeof(void*);
+  constexpr auto align = folly::max_align_v;
+  using inv_t = check_invocable<true, true, size, align>;
+  static_assert(std::is_trivially_copyable_v<inv_t>);
+  auto& inv = *static_cast<inv_t*>(obj);
+  ::new (fun) Function<void()>(inv);
+}
+
+extern "C" FOLLY_KEEP void check_folly_function_make_on_heap_default(
+    void* fun, void* obj) {
+  constexpr auto size = 12 * sizeof(void*);
+  constexpr auto align = folly::max_align_v;
+  using inv_t = check_invocable<false, true, size, align>;
+  static_assert(!std::is_trivially_copyable_v<inv_t>);
+  auto& inv = *static_cast<inv_t*>(obj);
+  ::new (fun) Function<void()>(inv);
+}
 
 namespace {
 int func_int_int_add_25(int x) {
@@ -188,6 +256,21 @@ static_assert(
 #endif
 
 static_assert(std::is_nothrow_destructible<Function<int(int)>>::value, "");
+
+struct RecStd {
+  using type = std::function<RecStd()>;
+  /* implicit */ RecStd(type f) : func(f) {}
+  explicit operator type() { return func; }
+  type func;
+};
+
+// Recursive class - regression case
+struct RecFolly {
+  using type = folly::Function<RecFolly()>;
+  /* implicit */ RecFolly(type f) : func(std::move(f)) {}
+  explicit operator type() { return std::move(func); }
+  type func;
+};
 
 // TEST =====================================================================
 // InvokeFunctor & InvokeReference
@@ -805,7 +888,12 @@ TEST(Function, ReturnConvertible) {
   Function<double()> f1 = []() -> int { return 5; };
   EXPECT_EQ(5.0, f1());
 
-  Function<int()> f2 = []() -> double { return 5.2; };
+  struct Convertible {
+    double value;
+    /* implicit */ Convertible(double v) noexcept : value{v} {}
+    /* implicit */ operator int() const noexcept { return int(value); }
+  };
+  Function<int()> f2 = []() -> Convertible { return 5.2; };
   EXPECT_EQ(5, f2());
 
   CDerived derived;
@@ -843,14 +931,20 @@ TEST(Function, ConvertReturnType) {
   };
   struct CDerived : CBase {};
 
+  struct Convertible {
+    double value;
+    /* implicit */ Convertible(double v) noexcept : value{v} {}
+    /* implicit */ operator int() const noexcept { return int(value); }
+  };
+
   Function<int()> f1 = []() -> int { return 5; };
   Function<double()> cf1 = std::move(f1);
   EXPECT_EQ(5.0, cf1());
-  Function<int()> ccf1 = std::move(cf1);
+  Function<Convertible()> ccf1 = std::move(cf1);
   EXPECT_EQ(5, ccf1());
 
   Function<double()> f2 = []() -> double { return 5.2; };
-  Function<int()> cf2 = std::move(f2);
+  Function<Convertible()> cf2 = std::move(f2);
   EXPECT_EQ(5, cf2());
   Function<double()> ccf2 = std::move(cf2);
   EXPECT_EQ(5.0, ccf2());
@@ -1073,6 +1167,47 @@ TEST(Function, asSharedProxy_explicit_bool_conversion) {
   EXPECT_FALSE(emptySpcopy);
 }
 
+struct BadCopier {
+  explicit BadCopier(int v) : v_(v) {}
+  BadCopier(const BadCopier& o) : v_(o.v_ + 1) {}
+  BadCopier(BadCopier&&) = default;
+  int v_;
+};
+std::array<int, 3> badCopierF(BadCopier a, const BadCopier& b, BadCopier&& c) {
+  std::array<int, 3> ret;
+  ret[0] = a.v_;
+  ret[1] = b.v_;
+  ret[2] = c.v_;
+  a.v_ *= -1;
+  c.v_ *= -1;
+  return ret;
+}
+TEST(Function, asSharedProxy_forwarding) {
+  folly::Function<decltype(badCopierF)> ff(badCopierF);
+  EXPECT_TRUE((std::is_same_v<
+               decltype(ff),
+               folly::Function<std::array<int, 3>(
+                   BadCopier a, const BadCopier& b, BadCopier&& c)>>));
+  auto sp = std::move(ff).asSharedProxy();
+
+  BadCopier bca(100);
+  BadCopier bcb(200);
+  BadCopier bcc(300);
+  auto vals = sp(bca, bcb, std::move(bcc));
+
+  // bca was passed into f by value, so was copied at least once
+  EXPECT_GT(vals[0], 100);
+  EXPECT_EQ(bca.v_, 100);
+
+  // bcb was passed into f by const&, so was never copied
+  EXPECT_EQ(vals[1], 200);
+  EXPECT_EQ(bcb.v_, 200);
+
+  // bcc was passed into f by &&, so was never copied but was mutated in f
+  EXPECT_EQ(vals[2], 300);
+  EXPECT_EQ(bcc.v_, -300);
+}
+
 TEST(Function, NoAllocatedMemoryAfterMove) {
   Functor<int, 100> foo;
 
@@ -1201,4 +1336,45 @@ TEST(Function, AllocatedSize) {
   EXPECT_GE(fromLambda.heapAllocatedMemory(), kCaptureBytes)
       << "Lambda-derived Function's allocated size is smaller than the "
          "lambda's capture size";
+}
+
+TEST(Function, TrivialSmallBig) {
+  auto tl = [] { return 7; };
+  static_assert(std::is_trivially_copyable_v<decltype(tl)>);
+
+  struct move_nx {
+    move_nx() {}
+    ~move_nx() {}
+    move_nx(move_nx&&) noexcept {}
+    void operator=(move_nx&&) = delete;
+  };
+  auto sl = [o = move_nx{}] { return 7; };
+  static_assert(!std::is_trivially_copyable_v<decltype(sl)>);
+  static_assert(std::is_nothrow_move_constructible_v<decltype(sl)>);
+
+  struct move_x {
+    move_x() {}
+    ~move_x() {}
+    move_x(move_x&&) noexcept(false) {}
+    void operator=(move_x&&) = delete;
+  };
+  auto hl = [o = move_x{}] { return 7; };
+  static_assert(!std::is_trivially_copyable_v<decltype(hl)>);
+  static_assert(!std::is_nothrow_move_constructible_v<decltype(hl)>);
+
+  Function<int()> t{std::move(tl)};
+  Function<int()> s{std::move(sl)};
+  Function<int()> h{std::move(hl)};
+
+  EXPECT_EQ(7, t());
+  EXPECT_EQ(7, s());
+  EXPECT_EQ(7, h());
+
+  auto t2 = std::move(t);
+  auto s2 = std::move(s);
+  auto h2 = std::move(h);
+
+  EXPECT_EQ(7, t2());
+  EXPECT_EQ(7, s2());
+  EXPECT_EQ(7, h2());
 }

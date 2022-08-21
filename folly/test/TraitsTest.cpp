@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -352,7 +352,6 @@ TEST(Traits, aligned_storage_for_t) {
   EXPECT_EQ(2, alignof(storage));
   EXPECT_TRUE(std::is_trivial<storage>::value);
   EXPECT_TRUE(std::is_standard_layout<storage>::value);
-  EXPECT_TRUE(std::is_pod<storage>::value); // pod = trivial + standard-layout
 }
 
 TEST(Traits, remove_cvref) {
@@ -481,4 +480,74 @@ TEST(Traits, is_constexpr_default_constructible) {
   };
   EXPECT_FALSE(is_constexpr_default_constructible_v<NoDefaultCtor>);
   EXPECT_FALSE(is_constexpr_default_constructible<NoDefaultCtor>{});
+}
+
+TEST(Traits, uint_bits) {
+  EXPECT_TRUE((std::is_same_v<uint8_t, uint_bits_t<8>>));
+  EXPECT_TRUE((std::is_same_v<uint16_t, uint_bits_t<16>>));
+  EXPECT_TRUE((std::is_same_v<uint32_t, uint_bits_t<32>>));
+  EXPECT_TRUE((std::is_same_v<uint64_t, uint_bits_t<64>>));
+#if FOLLY_HAVE_INT128_T
+  EXPECT_TRUE((std::is_same_v<uint128_t, uint_bits_t<128>>));
+#endif // FOLLY_HAVE_INT128_T
+}
+
+TEST(Traits, uint_bits_lg) {
+  EXPECT_TRUE((std::is_same_v<uint8_t, uint_bits_lg_t<3>>));
+  EXPECT_TRUE((std::is_same_v<uint16_t, uint_bits_lg_t<4>>));
+  EXPECT_TRUE((std::is_same_v<uint32_t, uint_bits_lg_t<5>>));
+  EXPECT_TRUE((std::is_same_v<uint64_t, uint_bits_lg_t<6>>));
+#if FOLLY_HAVE_INT128_T
+  EXPECT_TRUE((std::is_same_v<uint128_t, uint_bits_lg_t<7>>));
+#endif // FOLLY_HAVE_INT128_T
+}
+
+TEST(Traits, int_bits) {
+  EXPECT_TRUE((std::is_same_v<int8_t, int_bits_t<8>>));
+  EXPECT_TRUE((std::is_same_v<int16_t, int_bits_t<16>>));
+  EXPECT_TRUE((std::is_same_v<int32_t, int_bits_t<32>>));
+  EXPECT_TRUE((std::is_same_v<int64_t, int_bits_t<64>>));
+#if FOLLY_HAVE_INT128_T
+  EXPECT_TRUE((std::is_same_v<int128_t, int_bits_t<128>>));
+#endif // FOLLY_HAVE_INT128_T
+}
+
+TEST(Traits, int_bits_lg) {
+  EXPECT_TRUE((std::is_same_v<int8_t, int_bits_lg_t<3>>));
+  EXPECT_TRUE((std::is_same_v<int16_t, int_bits_lg_t<4>>));
+  EXPECT_TRUE((std::is_same_v<int32_t, int_bits_lg_t<5>>));
+  EXPECT_TRUE((std::is_same_v<int64_t, int_bits_lg_t<6>>));
+#if FOLLY_HAVE_INT128_T
+  EXPECT_TRUE((std::is_same_v<int128_t, int_bits_lg_t<7>>));
+#endif // FOLLY_HAVE_INT128_T
+}
+
+struct type_pack_element_test {
+  template <size_t I, typename... T>
+  using fallback = traits_detail::type_pack_element_fallback<I, T...>;
+  template <size_t I, typename... T>
+  using native = type_pack_element_t<I, T...>;
+
+  template <typename IC, typename... T>
+  using fallback_ic = fallback<IC::value, T...>;
+  template <typename IC, typename... T>
+  using native_ic = native<IC::value, T...>;
+};
+
+TEST(Traits, type_pack_element_t) {
+  using test = type_pack_element_test;
+
+  EXPECT_TRUE(( //
+      std::is_same_v<
+          test::fallback<3, int, int, int, double, int, int>,
+          double>));
+  EXPECT_TRUE((is_detected_v<test::fallback_ic, index_constant<0>, int>));
+  EXPECT_FALSE((is_detected_v<test::fallback_ic, index_constant<0>>));
+
+  EXPECT_TRUE(( //
+      std::is_same_v<
+          test::native<3, int, int, int, double, int, int>, //
+          double>));
+  EXPECT_TRUE((is_detected_v<test::native_ic, index_constant<0>, int>));
+  EXPECT_FALSE((is_detected_v<test::native_ic, index_constant<0>>));
 }

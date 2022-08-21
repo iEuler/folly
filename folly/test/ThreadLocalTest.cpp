@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,14 +39,24 @@
 #include <glog/logging.h>
 
 #include <folly/Memory.h>
+#include <folly/experimental/TestUtil.h>
 #include <folly/experimental/io/FsUtil.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Unistd.h>
 #include <folly/synchronization/Baton.h>
-#include <folly/synchronization/detail/ThreadCachedInts.h>
 #include <folly/system/ThreadId.h>
 
 using namespace folly;
+
+extern "C" FOLLY_KEEP int* check_thread_local_get(ThreadLocal<int>& o) {
+  return o.get();
+}
+
+extern "C" FOLLY_KEEP int* check_thread_local_get_existing(
+    ThreadLocal<int>& o) {
+  return o.get_existing();
+}
 
 struct Widget {
   static int totalVal_;
@@ -242,7 +252,7 @@ TEST(ThreadLocal, GetWithoutCreateUncreated) {
   Widget::totalMade_ = 0;
   ThreadLocal<Widget> w;
   std::thread([&w]() {
-    auto ptr = w.getIfExist();
+    auto ptr = w.get_existing();
     if (ptr) {
       ptr->val_++;
     }
@@ -256,7 +266,7 @@ TEST(ThreadLocal, GetWithoutCreateGets) {
   ThreadLocal<Widget> w;
   std::thread([&w]() {
     w->val_++;
-    auto ptr = w.getIfExist();
+    auto ptr = w.get_existing();
     if (ptr) {
       ptr->val_++;
     }
@@ -435,36 +445,6 @@ TEST(ThreadLocal, Movable2) {
 
   // Make sure that we have 4 different instances of *tl
   EXPECT_EQ(4, tls.size());
-}
-
-namespace {
-class ThreadCachedIntWidget {
- public:
-  ThreadCachedIntWidget() {}
-
-  ~ThreadCachedIntWidget() {
-    if (ints_) {
-      ints_->increment(0);
-    }
-  }
-
-  void set(detail::ThreadCachedInts<void>* ints) { ints_ = ints; }
-
- private:
-  detail::ThreadCachedInts<void>* ints_{nullptr};
-};
-} // namespace
-
-TEST(ThreadLocal, TCICreateOnThreadExit) {
-  detail::ThreadCachedInts<void> ints;
-  ThreadLocal<ThreadCachedIntWidget> w;
-
-  std::thread([&] {
-    // make sure the ints object is created
-    ints.increment(1);
-    // now the widget
-    w->set(&ints);
-  }).join();
 }
 
 namespace {
@@ -756,8 +736,8 @@ TEST(ThreadLocal, Fork2) {
 #endif
 
 TEST(ThreadLocal, SHARED_LIBRARY_TEST_NAME) {
-  auto exe = fs::executable_path();
-  auto lib = exe.parent_path() / "thread_local_test_lib.so";
+  auto const lib =
+      folly::test::find_resource("folly/test/thread_local_test_lib.so");
   auto handle = dlopen(lib.string().c_str(), RTLD_LAZY);
   ASSERT_NE(nullptr, handle)
       << "unable to load " << lib.string() << ": " << dlerror();

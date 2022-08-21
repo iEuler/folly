@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,10 @@
  */
 
 #pragma once
+
+#ifdef __APPLE__
+#include <TargetConditionals.h> // @manual
+#endif
 
 #if !defined(FOLLY_MOBILE)
 #if defined(__ANDROID__) || \
@@ -36,7 +40,6 @@
 #cmakedefine FOLLY_HAVE_LIBGLOG 1
 
 #cmakedefine FOLLY_USE_JEMALLOC 1
-#cmakedefine FOLLY_USE_LIBSTDCPP 1
 
 #if __has_include(<features.h>)
 #include <features.h>
@@ -60,10 +63,8 @@
 #cmakedefine FOLLY_HAVE_LINUX_VDSO 1
 #cmakedefine FOLLY_HAVE_MALLOC_USABLE_SIZE 1
 #cmakedefine FOLLY_HAVE_INT128_T 1
-#cmakedefine FOLLY_SUPPLY_MISSING_INT128_TRAITS 1
 #cmakedefine FOLLY_HAVE_WCHAR_SUPPORT 1
 #cmakedefine FOLLY_HAVE_EXTRANDOM_SFMT19937 1
-#cmakedefine FOLLY_USE_LIBCPP 1
 #cmakedefine HAVE_VSNPRINTF_ERRORS 1
 
 #cmakedefine FOLLY_HAVE_LIBUNWIND 1

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,10 +30,6 @@
 #include <folly/experimental/Instructions.h>
 #include <folly/experimental/Select64.h>
 #include <folly/lang/Bits.h>
-
-#if !FOLLY_X64
-#error BitVectorCoding.h requires x86_64
-#endif
 
 namespace folly {
 namespace compression {
@@ -332,6 +328,7 @@ class BitVectorReader : detail::ForwardPointers<Encoder::forwardQuantum>,
     return setValue(inner);
   }
 
+  template <bool kCanBeAtValue = true>
   bool skipTo(ValueType v) {
     // Also works when value_ == kInvalidValue.
     if (v != kInvalidValue) {
@@ -340,7 +337,7 @@ class BitVectorReader : detail::ForwardPointers<Encoder::forwardQuantum>,
 
     if (!kUnchecked && v > upperBound_) {
       return setDone();
-    } else if (v == value_) {
+    } else if (kCanBeAtValue && v == value_) {
       return true;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ TEST_F(HardwareTest, RtmBasicUsage) {
     EXPECT_FALSE(rtmEnabled());
   }
 
-  unsigned status;
+  unsigned status = 0;
   static constexpr uint8_t kAbortCode = 1;
   unsigned successCounts = 0;
   unsigned abortCounts = 0;

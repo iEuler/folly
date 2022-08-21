@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@
 #include <folly/portability/SysMman.h>
 #include <folly/portability/Unistd.h>
 
-DEFINE_bool(
+FOLLY_GFLAGS_DEFINE_bool(
     folly_memory_idler_purge_arenas,
     true,
     "if enabled, folly memory-idler purges jemalloc arenas on thread idle");
@@ -88,8 +88,8 @@ void MemoryIdler::flushLocalMallocCaches() {
 // Stack madvise isn't Linux or glibc specific, but the system calls
 // and arithmetic (and bug compatibility) are not portable.  The set of
 // platforms could be increased if it was useful.
-#if (FOLLY_X64 || FOLLY_PPC64) && defined(_GNU_SOURCE) && \
-    defined(__linux__) && !FOLLY_MOBILE && !FOLLY_SANITIZE_ADDRESS
+#if defined(__GLIBC__) && defined(__linux__) && !FOLLY_MOBILE && \
+    !FOLLY_SANITIZE_ADDRESS
 
 static thread_local uintptr_t tls_stackLimit;
 static thread_local size_t tls_stackSize;
@@ -104,8 +104,7 @@ static void fetchStackLimits() {
   pthread_attr_t attr;
   if ((err = pthread_getattr_np(pthread_self(), &attr))) {
     // some restricted environments can't access /proc
-    FB_LOG_EVERY_MS(WARNING, 60000)
-        << "pthread_getaddr_np failed errno=" << err;
+    FB_LOG_ONCE(ERROR) << "pthread_getaddr_np failed errno=" << err;
     tls_stackSize = 1;
     return;
   }
@@ -115,7 +114,7 @@ static void fetchStackLimits() {
   size_t rawSize;
   if ((err = pthread_attr_getstack(&attr, &addr, &rawSize))) {
     // unexpected, but it is better to continue in prod than do nothing
-    FB_LOG_EVERY_MS(ERROR, 10000) << "pthread_attr_getstack error " << err;
+    FB_LOG_ONCE(ERROR) << "pthread_attr_getstack error " << err;
     assert(false);
     tls_stackSize = 1;
     return;
@@ -131,14 +130,16 @@ static void fetchStackLimits() {
     //
     // Very large stack size is a bug (hence the assert), but we can
     // carry on if we are in prod.
-    FB_LOG_EVERY_MS(ERROR, 10000)
-        << "pthread_attr_getstack returned insane stack size " << rawSize;
+    FB_LOG_ONCE(ERROR) << "pthread_attr_getstack returned insane stack size "
+                       << rawSize;
     assert(false);
     tls_stackSize = 1;
     return;
   }
   assert(addr != nullptr);
-  assert(rawSize >= PTHREAD_STACK_MIN);
+  assert(
+      0 < PTHREAD_STACK_MIN &&
+      rawSize >= static_cast<size_t>(PTHREAD_STACK_MIN));
 
   // glibc subtracts guard page from stack size, even though pthread docs
   // seem to imply the opposite

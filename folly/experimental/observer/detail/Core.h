@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -111,7 +111,7 @@ class Core : public std::enable_shared_from_this<Core> {
 
   folly::Function<std::shared_ptr<const void>()> creator_;
 
-  std::mutex refreshMutex_;
+  SharedMutex refreshMutex_;
 
   bool forceRefresh_{false};
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,6 +79,47 @@ TEST(OpenSSLUtilsTest, getCommonNameEmpty) {
   X509UniquePtr x509 = createMinimalX509("");
 
   EXPECT_EQ(OpenSSLUtils::getCommonName(x509.get()), "");
+}
+
+// Tests that encodeALPNString returns a serialized version of the ALPN String
+TEST(OpenSSLUtilsTest, encodeALPNString) {
+  EXPECT_EQ(OpenSSLUtils::encodeALPNString({"rs"}), "\x2rs");
+  EXPECT_EQ(OpenSSLUtils::encodeALPNString({"rs", "h2"}), "\x2rs\x2h2");
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString({"rs", "h2", "spdy/3.1"}),
+      "\x2rs\x2h2\x8spdy/3.1");
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString({"rs", "h2", "spdy/3.1", "http/1.1"}),
+      "\x2rs\x2h2\x8spdy/3.1\x8http/1.1");
+
+  std::string maxSizeProtocolString(std::numeric_limits<uint8_t>::max(), 'p');
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString({maxSizeProtocolString}),
+      "\xFF" + maxSizeProtocolString);
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString({maxSizeProtocolString, "rs"}),
+      "\xFF" + maxSizeProtocolString + "\x2rs");
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString({maxSizeProtocolString, "rs", "h2"}),
+      "\xFF" + maxSizeProtocolString + "\x2rs\x2h2");
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString(
+          {maxSizeProtocolString, "rs", "h2", "spdy/3.1"}),
+      "\xFF" + maxSizeProtocolString + "\x2rs\x2h2\x8spdy/3.1");
+  EXPECT_EQ(
+      OpenSSLUtils::encodeALPNString(
+          {maxSizeProtocolString, "rs", "h2", "spdy/3.1", "http/1.1"}),
+      "\xFF" + maxSizeProtocolString + "\x2rs\x2h2\x8spdy/3.1\x8http/1.1");
+
+  std::string exceedsMaxSizeProtocolString(
+      std::numeric_limits<uint8_t>::max() + 1, 'p');
+
+  try {
+    OpenSSLUtils::encodeALPNString({exceedsMaxSizeProtocolString});
+  } catch (std::range_error const& err) {
+    EXPECT_EQ(
+        err.what(), std::string("ALPN protocol string exceeds maximum length"));
+  }
 }
 
 } // namespace folly

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -96,9 +96,9 @@ class AutoTimer final {
   }
 
   template <typename... Args>
-  DoubleSeconds logFormat(Args&&... args) {
+  DoubleSeconds logFormat(fmt::format_string<Args...> fmt, Args&&... args) {
     auto now = Clock::now();
-    return logImpl(now, format(std::forward<Args>(args)...).str());
+    return logImpl(now, fmt::format(fmt, std::forward<Args>(args)...));
   }
 
  private:

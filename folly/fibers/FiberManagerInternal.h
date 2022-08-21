@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -89,14 +89,18 @@ class FiberManager : public ::folly::Executor {
     size_t stackSize{kDefaultStackSize};
 
     /**
-     * Sanitizers need a lot of extra stack space. 16x is a conservative
-     * estimate, but 8x also worked with tests where it mattered. Similarly,
-     * debug builds need extra stack space due to reduced inlining.
+     * Sanitizers need a lot of extra stack space. Benchmarks results at
+     * https://www.usenix.org/system/files/conference/atc12/atc12-final39.pdf,
+     * table 2, show that average stack increase with ASAN is 10% and extreme is
+     * 306%. Setting to 400% as "works for majority of clients" setting. If
+     * stack data layout of the service leads to even higher ASAN memory
+     * overhead, those services can tune their fiber stack sizes further.
      *
-     * Note that over-allocating here does not necessarily increase RSS, since
-     * unused memory is pretty much free.
+     * Even in the absence of ASAN, debug builds still need extra stack space
+     * due to reduced inlining.
+     *
      */
-    size_t stackSizeMultiplier{kIsSanitize ? 16 : (kIsDebug ? 2 : 1)};
+    size_t stackSizeMultiplier{kIsSanitize ? 4 : (kIsDebug ? 2 : 1)};
 
     /**
      * Record exact amount of stack used.
@@ -158,7 +162,7 @@ class FiberManager : public ::folly::Executor {
   };
 
   using ExceptionCallback =
-      folly::Function<void(std::exception_ptr, std::string)>;
+      folly::Function<void(const std::exception_ptr&, StringPiece context)>;
 
   FiberManager(const FiberManager&) = delete;
   FiberManager& operator=(const FiberManager&) = delete;
@@ -226,7 +230,9 @@ class FiberManager : public ::folly::Executor {
    * Does not include the number of remotely enqueued tasks that have not been
    * run yet.
    */
-  size_t numActiveTasks() const noexcept { return fibersActive_; }
+  size_t numActiveTasks() const noexcept {
+    return fibersActive_.load(std::memory_order_relaxed);
+  }
 
   /**
    * @return true if there are tasks ready to run.
@@ -455,6 +461,9 @@ class FiberManager : public ::folly::Executor {
     AtomicIntrusiveLinkedListHook<RemoteTask> nextRemoteTask;
   };
 
+  static void defaultExceptionCallback(
+      const std::exception_ptr& eptr, StringPiece context);
+
   template <typename F>
   Fiber* createTask(F&& func, TaskOptions taskOptions);
 
@@ -493,7 +502,8 @@ class FiberManager : public ::folly::Executor {
   std::atomic<size_t> fibersAllocated_{0};
   // total number of fibers in the free pool
   std::atomic<size_t> fibersPoolSize_{0};
-  size_t fibersActive_{0}; /**< number of running or blocked fibers */
+  std::atomic<size_t> fibersActive_{
+      0}; /**< number of running or blocked fibers */
   size_t fiberId_{0}; /**< id of last fiber used */
 
   /**
@@ -602,19 +612,14 @@ class FiberManager : public ::folly::Executor {
   void runReadyFiber(Fiber* fiber);
   void remoteReadyInsert(Fiber* fiber);
 
-#ifdef FOLLY_SANITIZE_ADDRESS
-
   // These methods notify ASAN when a fiber is entered/exited so that ASAN can
   // find the right stack extents when it needs to poison/unpoison the stack.
-
   void registerStartSwitchStackWithAsan(
       void** saveFakeStack, const void* stackBase, size_t stackSize);
   void registerFinishSwitchStackWithAsan(
       void* fakeStack, const void** saveStackBase, size_t* saveStackSize);
   void freeFakeStack(void* fakeStack);
   void unpoisonFiberStack(const Fiber* fiber);
-
-#endif // FOLLY_SANITIZE_ADDRESS
 
   bool alternateSignalStackRegistered_{false};
 

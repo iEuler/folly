@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,10 @@
 #include <folly/hash/SpookyHashV1.h>
 #include <folly/hash/SpookyHashV2.h>
 #include <folly/lang/Bits.h>
+
+#if FOLLY_HAS_STRING_VIEW
+#include <string_view>
+#endif
 
 namespace folly {
 namespace hash {
@@ -301,12 +305,13 @@ inline uint64_t fnva64(
 
 #define get16bits(d) folly::loadUnaligned<uint16_t>(d)
 
-inline uint32_t hsieh_hash32_buf(const void* buf, size_t len) noexcept {
+inline constexpr uint32_t hsieh_hash32_buf_constexpr(
+    const unsigned char* buf, size_t len) noexcept {
   // forcing signed char, since other platforms can use unsigned
-  const unsigned char* s = reinterpret_cast<const unsigned char*>(buf);
+  const unsigned char* s = buf;
   uint32_t hash = static_cast<uint32_t>(len);
-  uint32_t tmp;
-  size_t rem;
+  uint32_t tmp = 0;
+  size_t rem = 0;
 
   if (len <= 0 || buf == nullptr) {
     return 0;
@@ -356,6 +361,11 @@ inline uint32_t hsieh_hash32_buf(const void* buf, size_t len) noexcept {
 
 #undef get16bits
 
+inline uint32_t hsieh_hash32_buf(const void* buf, size_t len) noexcept {
+  return hsieh_hash32_buf_constexpr(
+      reinterpret_cast<const unsigned char*>(buf), len);
+}
+
 inline uint32_t hsieh_hash32(const char* s) noexcept {
   return hsieh_hash32_buf(s, std::strlen(s));
 }
@@ -368,23 +378,23 @@ inline uint32_t hsieh_hash32_str(const std::string& str) noexcept {
 
 namespace detail {
 
-template <typename I>
+template <typename Int>
 struct integral_hasher {
   using folly_is_avalanching =
-      bool_constant<(sizeof(I) >= 8 || sizeof(size_t) == 4)>;
+      bool_constant<(sizeof(Int) >= 8 || sizeof(size_t) == 4)>;
 
-  size_t operator()(I const& i) const noexcept {
-    static_assert(sizeof(I) <= 16, "Input type is too wide");
-    /* constexpr */ if (sizeof(I) <= 4) {
+  constexpr size_t operator()(Int const& i) const noexcept {
+    static_assert(sizeof(Int) <= 16, "Input type is too wide");
+    /* constexpr */ if (sizeof(Int) <= 4) {
       auto const i32 = static_cast<int32_t>(i); // impl accident: sign-extends
       auto const u32 = static_cast<uint32_t>(i32);
       return static_cast<size_t>(hash::jenkins_rev_mix32(u32));
-    } else if (sizeof(I) <= 8) {
+    } else if (sizeof(Int) <= 8) {
       auto const u64 = static_cast<uint64_t>(i);
       return static_cast<size_t>(hash::twang_mix64(u64));
     } else {
       auto const u = to_unsigned(i);
-      auto const hi = static_cast<uint64_t>(u >> sizeof(I) * 4);
+      auto const hi = static_cast<uint64_t>(u >> sizeof(Int) * 4);
       auto const lo = static_cast<uint64_t>(u);
       return hash::hash_128_to_64(hi, lo);
     }
@@ -415,16 +425,17 @@ struct hasher;
 
 struct Hash {
   template <class T>
-  size_t operator()(const T& v) const noexcept(noexcept(hasher<T>()(v))) {
+  constexpr size_t operator()(const T& v) const
+      noexcept(noexcept(hasher<T>()(v))) {
     return hasher<T>()(v);
   }
 
   template <class T, class... Ts>
-  size_t operator()(const T& t, const Ts&... ts) const {
+  constexpr size_t operator()(const T& t, const Ts&... ts) const {
     return hash::hash_128_to_64((*this)(t), (*this)(ts...));
   }
 
-  size_t operator()() const noexcept { return 0; }
+  constexpr size_t operator()() const noexcept { return 0; }
 };
 
 // IsAvalanchingHasher<H, K> extends std::integral_constant<bool, V>.
@@ -492,7 +503,7 @@ template <>
 struct hasher<bool> {
   using folly_is_avalanching = std::true_type;
 
-  size_t operator()(bool key) const noexcept {
+  constexpr size_t operator()(bool key) const noexcept {
     // Make sure that all the output bits depend on the input.
     return key ? std::numeric_limits<size_t>::max() : 0;
   }
@@ -560,6 +571,20 @@ struct hasher<std::string> {
 };
 template <typename K>
 struct IsAvalanchingHasher<hasher<std::string>, K> : std::true_type {};
+
+#if FOLLY_HAS_STRING_VIEW
+template <>
+struct hasher<std::string_view> {
+  using folly_is_avalanching = std::true_type;
+
+  size_t operator()(const std::string_view& key) const {
+    return static_cast<size_t>(
+        hash::SpookyHashV2::Hash64(key.data(), key.size(), 0));
+  }
+};
+template <typename K>
+struct IsAvalanchingHasher<hasher<std::string_view>, K> : std::true_type {};
+#endif
 
 template <typename T>
 struct hasher<T, std::enable_if_t<std::is_enum<T>::value>> {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -820,6 +820,27 @@ class SemiFuture : private futures::detail::FutureBase<T> {
   SemiFuture<T> deferError(R (&func)(Args...)) && {
     return std::move(*this).deferError(&func);
   }
+
+  /// func is like std::function<void()> and is executed unconditionally
+  /// provided that the Semifuture is waited or given an executor, and
+  /// the value/exception is passed through to the resulting SemiFuture.
+  /// func shouldn't throw, but if it does it will be captured and propagated,
+  /// and discard any value/exception that this Semifuture has obtained.
+  ///
+  /// Caution: if the SemiFuture is detached - i.e., neither waited nor given an
+  /// executor - then func will not be invoked.
+  ///
+  /// Preconditions:
+  ///
+  /// - `valid() == true` (else throws FutureInvalid)
+  ///
+  /// Postconditions:
+  ///
+  /// - Calling code should act as if `valid() == false`,
+  ///   i.e., as if `*this` was moved into RESULT.
+  /// - `RESULT.valid() == true`
+  template <class F>
+  SemiFuture<T> deferEnsure(F&& func) &&;
 
   /// Convenience method for ignoring the value and creating a Future<Unit>.
   /// Exceptions still propagate.
@@ -1877,8 +1898,8 @@ class Future : private futures::detail::FutureBase<T> {
   /// - Calling code should act as if `valid() == false`,
   ///   i.e., as if `*this` was moved into RESULT.
   /// - `RESULT.valid() == true`
-  template <class I, class F>
-  Future<I> reduce(I&& initial, F&& func) &&;
+  template <class In, class F>
+  Future<In> reduce(In&& initial, F&& func) &&;
 
   /// Moves-out `*this`, creating/returning a corresponding SemiFuture.
   /// Result will behave like `*this` except result won't have an Executor.
@@ -2387,7 +2408,7 @@ auto collectAll(Collection&& c) -> decltype(collectAll(c.begin(), c.end())) {
   return collectAll(c.begin(), c.end());
 }
 
-// Unsafe variant of collectAll, see coment above for details. Returns
+// Unsafe variant of collectAll, see comment above for details. Returns
 // a Future<std::tuple<Try<T1>, Try<T2>, ...>> on the Inline executor.
 template <typename... Fs>
 Future<std::tuple<Try<typename remove_cvref_t<Fs>::value_type>...>>

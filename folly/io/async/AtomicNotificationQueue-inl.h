@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 #pragma once
 
 #include <folly/FileUtil.h>
-#include <folly/io/async/AtomicNotificationQueue.h>
 #include <folly/system/Pid.h>
 
 namespace folly {
@@ -101,8 +100,10 @@ AtomicNotificationQueue<Task>::AtomicQueue::~AtomicQueue() {
 
 template <typename Task>
 template <typename... Args>
-bool AtomicNotificationQueue<Task>::AtomicQueue::push(Args&&... args) {
-  std::unique_ptr<Node> node(new Node(std::forward<Args>(args)...));
+bool AtomicNotificationQueue<Task>::AtomicQueue::pushImpl(
+    std::shared_ptr<RequestContext> rctx, Args&&... args) {
+  std::unique_ptr<Node> node(
+      new Node(std::move(rctx), std::forward<Args>(args)...));
   auto head = head_.load(std::memory_order_relaxed);
   while (true) {
     node->next =
@@ -116,6 +117,20 @@ bool AtomicNotificationQueue<Task>::AtomicQueue::push(Args&&... args) {
       return reinterpret_cast<intptr_t>(head) == kQueueArmedTag;
     }
   }
+}
+
+template <typename Task>
+template <typename... Args>
+bool AtomicNotificationQueue<Task>::AtomicQueue::push(Args&&... args) {
+  auto rctx = RequestContext::saveContext();
+  return pushImpl(std::move(rctx), std::forward<Args>(args)...);
+}
+
+template <typename Task>
+template <typename... Args>
+bool AtomicNotificationQueue<Task>::AtomicQueue::push(
+    std::shared_ptr<RequestContext> rctx, Args&&... args) {
+  return pushImpl(std::move(rctx), std::forward<Args>(args)...);
 }
 
 template <typename Task>
@@ -195,6 +210,14 @@ template <typename... Args>
 bool AtomicNotificationQueue<Task>::push(Args&&... args) {
   pushCount_.fetch_add(1, std::memory_order_relaxed);
   return atomicQueue_.push(std::forward<Args>(args)...);
+}
+
+template <typename Task>
+template <typename... Args>
+bool AtomicNotificationQueue<Task>::push(
+    std::shared_ptr<RequestContext> rctx, Args&&... args) {
+  pushCount_.fetch_add(1, std::memory_order_relaxed);
+  return atomicQueue_.push(std::move(rctx), std::forward<Args>(args)...);
 }
 
 template <typename Task>
@@ -297,7 +320,7 @@ bool AtomicNotificationQueue<Task>::drive(Consumer&& consumer) {
     nextQueue = atomicQueue_.getTasks();
   }
   const bool wasAnyProcessed = !queue_.empty() || !nextQueue.empty();
-  for (int32_t numConsumed = 0;
+  for (uint32_t numConsumed = 0;
        maxReadAtOnce_ == 0 || numConsumed < maxReadAtOnce_;) {
     if (queue_.empty()) {
       queue_ = std::move(nextQueue);

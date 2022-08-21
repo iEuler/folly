@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -568,7 +568,7 @@ template <
 struct VTable;
 
 template <class T, FOLLY_AUTO User, class I>
-inline constexpr ThunkFn<T, User, I> thunk() noexcept {
+inline constexpr ThunkFn<T, User, I> thunk_() noexcept {
   return ThunkFn<T, User, I>{};
 }
 
@@ -721,7 +721,7 @@ struct VTable<I, PolyMembers<Arch...>, TypeList<S...>>
   template <class T, FOLLY_AUTO... User>
   constexpr VTable(Type<T>, PolyMembers<User...>) noexcept
       : BasePtr<S>{vtableFor<S, T>()}...,
-        std::tuple<SignatureOf<Arch, I>...>{thunk<T, User, I>()...},
+        std::tuple<SignatureOf<Arch, I>...>{thunk_<T, User, I>()...},
         state_{inSitu<T>() ? State::eInSitu : State::eOnHeap},
         ops_{getOps<I, T>()} {}
 
@@ -878,7 +878,7 @@ struct Sig {
   }
 };
 
-// A functon type with no arguments means the user is trying to disambiguate
+// A function type with no arguments means the user is trying to disambiguate
 // a member function pointer.
 template <class R>
 struct Sig<R()> : Sig<R() const> {

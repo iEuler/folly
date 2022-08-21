@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ class ViaCoroutinePromiseBase {
     executor_ = std::move(executor);
   }
 
-  void setContinuation(coroutine_handle<> continuation) noexcept {
+  void setContinuation(ExtendedCoroutineHandle continuation) noexcept {
     continuation_ = continuation;
   }
 
@@ -76,6 +76,10 @@ class ViaCoroutinePromiseBase {
 
  protected:
   void scheduleContinuation() noexcept {
+    // Pass the coroutine's RequestContext to Executor::add(), in case the
+    // Executor implementation wants to know what runs on it (e.g. for stats).
+    RequestContextScopeGuard contextScope{context_};
+
     executor_->add([this]() noexcept { this->executeContinuation(); });
   }
 
@@ -83,15 +87,18 @@ class ViaCoroutinePromiseBase {
   void executeContinuation() noexcept {
     RequestContextScopeGuard contextScope{std::move(context_)};
     if (asyncFrame_ != nullptr) {
-      folly::resumeCoroutineWithNewAsyncStackRoot(continuation_, *asyncFrame_);
+      folly::resumeCoroutineWithNewAsyncStackRoot(
+          continuation_.getHandle(), *asyncFrame_);
     } else {
       continuation_.resume();
     }
   }
 
  protected:
+  virtual ~ViaCoroutinePromiseBase() = default;
+
   folly::Executor::KeepAlive<> executor_;
-  coroutine_handle<> continuation_;
+  ExtendedCoroutineHandle continuation_;
   folly::AsyncStackFrame* asyncFrame_ = nullptr;
   std::shared_ptr<RequestContext> context_;
 };
@@ -99,10 +106,14 @@ class ViaCoroutinePromiseBase {
 template <bool IsStackAware>
 class ViaCoroutine {
  public:
-  class promise_type : public ViaCoroutinePromiseBase {
+  class promise_type final : public ViaCoroutinePromiseBase,
+                             public ExtendedCoroutinePromiseImpl<promise_type> {
     struct FinalAwaiter {
       bool await_ready() noexcept { return false; }
 
+      // This code runs immediately after the inner awaitable resumes its fake
+      // continuation, and it schedules the real continuation on the awaiter's
+      // executor
       FOLLY_CORO_AWAIT_SUSPEND_NONTRIVIAL_ATTRIBUTES void await_suspend(
           coroutine_handle<promise_type> h) noexcept {
         auto& promise = h.promise();
@@ -134,6 +145,16 @@ class ViaCoroutine {
       DCHECK(this->asyncFrame_ != nullptr);
       return *this->asyncFrame_;
     }
+
+    std::pair<ExtendedCoroutineHandle, AsyncStackFrame*> getErrorHandle(
+        exception_wrapper& ex) override {
+      auto [handle, frame] = continuation_.getErrorHandle(ex);
+      setContinuation(handle);
+      if (frame && IsStackAware) {
+        asyncFrame_ = frame;
+      }
+      return {promise_type::getHandle(), nullptr};
+    }
   };
 
   ViaCoroutine(ViaCoroutine&& other) noexcept
@@ -155,7 +176,7 @@ class ViaCoroutine {
     coro_.promise().setExecutor(std::move(executor));
   }
 
-  void setContinuation(coroutine_handle<> continuation) noexcept {
+  void setContinuation(ExtendedCoroutineHandle continuation) noexcept {
     coro_.promise().setContinuation(continuation);
   }
 
@@ -523,17 +544,77 @@ class TryAwaiter {
   Awaiter awaiter_;
 };
 
-template <typename T>
-class TryAwaitable {
+/**
+ * Common machinery for building wrappers like co_awaitTry
+ * Allows the wrapper to commute with the universal wrappers like
+ * co_withCancellation while keeping the corresponding awaitable on the outside
+ */
+template <template <typename T> typename Derived, typename T>
+class CommutativeWrapperAwaitable {
  public:
   template <typename T2>
-  explicit TryAwaitable(T2&& awaitable) noexcept(
+  explicit CommutativeWrapperAwaitable(T2&& awaitable) noexcept(
       std::is_nothrow_constructible_v<T, T2>)
       : inner_(static_cast<T2&&>(awaitable)) {}
 
   template <typename Factory>
-  explicit TryAwaitable(std::in_place_t, Factory&& factory)
+  explicit CommutativeWrapperAwaitable(std::in_place_t, Factory&& factory)
       : inner_(factory()) {}
+
+  template <
+      typename T2 = T,
+      typename Result = decltype(folly::coro::co_withCancellation(
+          std::declval<const folly::CancellationToken&>(), std::declval<T2>()))>
+  friend Derived<Result> co_withCancellation(
+      const folly::CancellationToken& cancelToken, Derived<T>&& awaitable) {
+    return Derived<Result>{std::in_place, [&]() -> decltype(auto) {
+                             return folly::coro::co_withCancellation(
+                                 cancelToken,
+                                 static_cast<T&&>(awaitable.inner_));
+                           }};
+  }
+
+  template <
+      typename T2 = T,
+      typename Result =
+          decltype(folly::coro::co_withAsyncStack(std::declval<T2>()))>
+  friend Derived<Result>
+  tag_invoke(cpo_t<co_withAsyncStack>, Derived<T>&& awaitable) noexcept(
+      noexcept(folly::coro::co_withAsyncStack(std::declval<T2>()))) {
+    return Derived<Result>{std::in_place, [&]() -> decltype(auto) {
+                             return folly::coro::co_withAsyncStack(
+                                 static_cast<T&&>(awaitable.inner_));
+                           }};
+  }
+
+  template <
+      typename T2 = T,
+      typename Result = decltype(folly::coro::co_viaIfAsync(
+          std::declval<folly::Executor::KeepAlive<>>(), std::declval<T2>()))>
+  friend Derived<Result> co_viaIfAsync(
+      folly::Executor::KeepAlive<> executor,
+      Derived<T>&&
+          awaitable) noexcept(noexcept(folly::coro::
+                                           co_viaIfAsync(
+                                               std::declval<folly::Executor::
+                                                                KeepAlive<>>(),
+                                               std::declval<T2>()))) {
+    return Derived<Result>{std::in_place, [&]() -> decltype(auto) {
+                             return folly::coro::co_viaIfAsync(
+                                 std::move(executor),
+                                 static_cast<T&&>(awaitable.inner_));
+                           }};
+  }
+
+ protected:
+  T inner_;
+};
+
+template <typename T>
+class TryAwaitable : public CommutativeWrapperAwaitable<TryAwaitable, T> {
+ public:
+  using CommutativeWrapperAwaitable<TryAwaitable, T>::
+      CommutativeWrapperAwaitable;
 
   template <
       typename Self,
@@ -545,54 +626,6 @@ class TryAwaitable {
   friend TryAwaiter<T2> operator co_await(Self&& self) {
     return TryAwaiter<T2>{static_cast<Self&&>(self).inner_};
   }
-
-  template <
-      typename T2 = T,
-      typename Result = decltype(folly::coro::co_withCancellation(
-          std::declval<const folly::CancellationToken&>(), std::declval<T2>()))>
-  friend TryAwaitable<Result> co_withCancellation(
-      const folly::CancellationToken& cancelToken, TryAwaitable&& awaitable) {
-    return TryAwaitable<Result>{std::in_place, [&]() -> decltype(auto) {
-                                  return folly::coro::co_withCancellation(
-                                      cancelToken,
-                                      static_cast<T&&>(awaitable.inner_));
-                                }};
-  }
-
-  template <
-      typename T2 = T,
-      typename Result =
-          decltype(folly::coro::co_withAsyncStack(std::declval<T2>()))>
-  friend TryAwaitable<Result>
-  tag_invoke(cpo_t<co_withAsyncStack>, TryAwaitable&& awaitable) noexcept(
-      noexcept(folly::coro::co_withAsyncStack(std::declval<T2>()))) {
-    return TryAwaitable<Result>{std::in_place, [&]() -> decltype(auto) {
-                                  return folly::coro::co_withAsyncStack(
-                                      static_cast<T&&>(awaitable.inner_));
-                                }};
-  }
-
-  template <
-      typename T2 = T,
-      typename Result = decltype(folly::coro::co_viaIfAsync(
-          std::declval<folly::Executor::KeepAlive<>>(), std::declval<T2>()))>
-  friend TryAwaitable<Result> co_viaIfAsync(
-      folly::Executor::KeepAlive<> executor,
-      TryAwaitable&&
-          awaitable) noexcept(noexcept(folly::coro::
-                                           co_viaIfAsync(
-                                               std::declval<folly::Executor::
-                                                                KeepAlive<>>(),
-                                               std::declval<T2>()))) {
-    return TryAwaitable<Result>{std::in_place, [&]() -> decltype(auto) {
-                                  return folly::coro::co_viaIfAsync(
-                                      std::move(executor),
-                                      static_cast<T&&>(awaitable.inner_));
-                                }};
-  }
-
- private:
-  T inner_;
 };
 
 } // namespace detail
@@ -609,6 +642,27 @@ using semi_await_try_result_t =
     await_result_t<decltype(folly::coro::co_viaIfAsync(
         std::declval<folly::Executor::KeepAlive<>>(),
         folly::coro::co_awaitTry(std::declval<T>())))>;
+
+namespace detail {
+
+template <typename T>
+class NothrowAwaitable
+    : public CommutativeWrapperAwaitable<NothrowAwaitable, T> {
+ public:
+  using CommutativeWrapperAwaitable<NothrowAwaitable, T>::
+      CommutativeWrapperAwaitable;
+
+  T&& unwrap() { return std::move(this->inner_); }
+};
+
+} // namespace detail
+
+template <typename Awaitable>
+detail::NothrowAwaitable<remove_cvref_t<Awaitable>> co_nothrow(
+    Awaitable&& awaitable) {
+  return detail::NothrowAwaitable<remove_cvref_t<Awaitable>>{
+      static_cast<Awaitable&&>(awaitable)};
+}
 
 } // namespace coro
 } // namespace folly

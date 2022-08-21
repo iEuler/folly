@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -163,6 +163,9 @@ class SimpleAsyncIO : public EventHandler {
       Function<void(AsyncBaseOp*)> preparer, SimpleAsyncIOCompletor completor);
 
   virtual void handlerReady(uint16_t events) noexcept override;
+
+  template <typename AsyncIOType>
+  void init();
 
   size_t maxRequests_;
   Executor::KeepAlive<> completionExecutor_;

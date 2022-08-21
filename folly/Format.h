@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -12,6 +12,18 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ */
+
+/**
+ * folly::format has been superseded by
+ * [fmt](https://fmt.dev/latest/index.html). `#include <fmt/core.h>`
+ *
+ * format() performs text-formatting, similar to Python's str.format. The full
+ * specification is on github:
+ * https://github.com/facebook/folly/blob/main/folly/docs/Format.md
+ *
+ * @refcode docs/examples/folly/Format.cpp
+ * @file Format.h
  */
 
 #pragma once
@@ -61,7 +73,7 @@ class FormatterTag {};
  */
 
 /* BaseFormatter class.
- * Overridable behaviours:
+ * Overridable behaviors:
  * You may override the actual formatting of positional parameters in
  * `doFormatArg`. The Formatter class provides the default implementation.
  *
@@ -286,7 +298,11 @@ inline std::string sformat(StringPiece fmt, Args&&... args) {
  * but the latter is cleaner.
  */
 template <class Container>
-Formatter<true, Container> vformat(StringPiece fmt, Container&& container) {
+[[deprecated(
+    "Use fmt::format instead of folly::vformat for better performance, build "
+    "times and compatibility with std::format")]] //
+Formatter<true, Container>
+vformat(StringPiece fmt, Container&& container) {
   return Formatter<true, Container>(fmt, std::forward<Container>(container));
 }
 
@@ -295,7 +311,11 @@ Formatter<true, Container> vformat(StringPiece fmt, Container&& container) {
  * intermediate format object.
  */
 template <class Container>
-inline std::string svformat(StringPiece fmt, Container&& container) {
+[[deprecated(
+    "Use fmt::format instead of folly::svformat for better performance, build "
+    "times and compatibility with std::format")]] //
+inline std::string
+svformat(StringPiece fmt, Container&& container) {
   return vformat(fmt, std::forward<Container>(container)).str();
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,13 @@
 #include <folly/container/F14Set.h>
 #include <folly/functional/Invoke.h>
 
-#if FOLLY_USE_RANGEV3
+// inner condition from:
+// https://github.com/ericniebler/range-v3/blob/0.11.0/include/range/v3/detail/config.hpp#L222
+#define FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3 \
+  __has_include(<range/v3/version.hpp>) && \
+    (!_MSC_VER || !(_MSC_VER < 1920 || _MSVC_LANG < 201703L))
+
+#if FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3
 #include <range/v3/view/filter.hpp>
 #include <range/v3/view/transform.hpp>
 #endif
@@ -135,14 +141,14 @@ class ReferencedSource
 
   template <class Body>
   void foreach(Body&& body) const {
-    for (auto& value : *container_) {
+    for (auto&& value : *container_) {
       body(std::forward<Value>(value));
     }
   }
 
   template <class Handler>
   bool apply(Handler&& handler) const {
-    for (auto& value : *container_) {
+    for (auto&& value : *container_) {
       if (!handler(std::forward<Value>(value))) {
         return false;
       }
@@ -413,6 +419,7 @@ class Yield : public GenImpl<Value, Yield<Value, Source>> {
 template <class Value>
 class Empty : public GenImpl<Value, Empty<Value>> {
  public:
+  Empty() = default;
   template <class Handler>
   bool apply(Handler&&) const {
     return true;
@@ -804,10 +811,8 @@ class Stride : public Operator<Stride> {
       size_t distance = stride_;
       return source_.apply([&](Value value) -> bool {
         if (++distance >= stride_) {
-          if (!handler(std::forward<Value>(value))) {
-            return false;
-          }
           distance = 0;
+          return handler(std::forward<Value>(value));
         }
         return true;
       });
@@ -1292,6 +1297,7 @@ class GroupByAdjacent : public Operator<GroupByAdjacent<Selector>> {
 template <class Expected>
 class TypeAssertion : public Operator<TypeAssertion<Expected>> {
  public:
+  TypeAssertion() = default;
   template <class Source, class Value>
   const Source& compose(const GenImpl<Value, Source>& source) const {
     static_assert(
@@ -1730,28 +1736,28 @@ class RangeConcat : public Operator<RangeConcat> {
  **/
 template <class Exception, class ErrorHandler>
 class GuardImpl : public Operator<GuardImpl<Exception, ErrorHandler>> {
-  ErrorHandler handler_;
+  ErrorHandler exceptionHandler_;
 
  public:
-  explicit GuardImpl(ErrorHandler handler) : handler_(std::move(handler)) {}
+  explicit GuardImpl(ErrorHandler handler)
+      : exceptionHandler_(std::move(handler)) {}
 
   template <class Value, class Source>
   class Generator : public GenImpl<Value, Generator<Value, Source>> {
     Source source_;
-    ErrorHandler handler_;
+    ErrorHandler exceptionHandler_;
 
    public:
     explicit Generator(Source source, ErrorHandler handler)
-        : source_(std::move(source)), handler_(std::move(handler)) {}
+        : source_(std::move(source)), exceptionHandler_(std::move(handler)) {}
 
     template <class Handler>
     bool apply(Handler&& handler) const {
       return source_.apply([&](Value value) -> bool {
         try {
-          handler(std::forward<Value>(value));
-          return true;
+          return handler(std::forward<Value>(value));
         } catch (Exception& e) {
-          return handler_(e, std::forward<Value>(value));
+          return exceptionHandler_(e, std::forward<Value>(value));
         }
       });
     }
@@ -1762,12 +1768,12 @@ class GuardImpl : public Operator<GuardImpl<Exception, ErrorHandler>> {
 
   template <class Value, class Source, class Gen = Generator<Value, Source>>
   Gen compose(GenImpl<Value, Source>&& source) const {
-    return Gen(std::move(source.self()), handler_);
+    return Gen(std::move(source.self()), exceptionHandler_);
   }
 
   template <class Value, class Source, class Gen = Generator<Value, Source>>
   Gen compose(const GenImpl<Value, Source>& source) const {
-    return Gen(source.self(), handler_);
+    return Gen(source.self(), exceptionHandler_);
   }
 };
 
@@ -1805,10 +1811,7 @@ class Dereference : public Operator<Dereference> {
     template <class Handler>
     bool apply(Handler&& handler) const {
       return source_.apply([&](Value value) -> bool {
-        if (value) {
-          return handler(*std::forward<Value>(value));
-        }
-        return true;
+        return !value || handler(*std::forward<Value>(value));
       });
     }
 
@@ -2452,6 +2455,7 @@ const T& operator|(const Optional<T>& opt, const Unwrap&) {
 
 class ToVirtualGen : public Operator<ToVirtualGen> {
  public:
+  using Operator<ToVirtualGen>::Operator;
   template <
       class Source,
       class Generator = VirtualGenMoveOnly<typename Source::ValueType>>
@@ -2460,7 +2464,7 @@ class ToVirtualGen : public Operator<ToVirtualGen> {
   }
 };
 
-#if FOLLY_USE_RANGEV3
+#if FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3
 template <class RangeV3, class Value>
 class RangeV3Source
     : public gen::GenImpl<Value, RangeV3Source<RangeV3, Value>> {
@@ -2541,10 +2545,10 @@ struct from_rangev3_copy_fn {
     return RangeV3CopySource<RangeDecay, Value>(std::move(r));
   }
 };
-#endif // FOLLY_USE_RANGEV3
+#endif // FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3
 } // namespace detail
 
-#if FOLLY_USE_RANGEV3
+#if FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3
 /*
  ******************************************************************************
  * Pipe fittings between a container/range-v3 and a folly::gen.
@@ -2569,9 +2573,9 @@ template <typename Range>
 auto rangev3_will_be_consumed(Range&& r) {
   // intentionally use `r` instead of `std::forward<Range>(r)`; see above.
   // range-v3 ranges copy in O(1) so it is appropriate.
-  return ranges::views::all(r);
+  return ::ranges::views::all(r);
 }
-#endif // FOLLY_USE_RANGEV3
+#endif // FOLLY_DETAIL_GEN_BASE_HAS_RANGEV3
 
 /**
  * VirtualGen<T> - For wrapping template types in simple polymorphic wrapper.

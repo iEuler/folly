@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -300,7 +300,7 @@ FOLLY_NOINLINE bool SaturatingSemaphore<MayBlock, Atom>::tryWaitSlow(
          !folly::atomic_compare_exchange_weak_explicit<Atom>(
              &state_,
              &before,
-             static_cast<std::uint32_t>(BLOCKED),
+             BLOCKED,
              std::memory_order_relaxed,
              std::memory_order_acquire)) {
     if (before == READY) {

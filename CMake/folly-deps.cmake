@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ if (ZLIB_FOUND)
   list(APPEND CMAKE_REQUIRED_LIBRARIES ${ZLIB_LIBRARIES})
 endif()
 
-find_package(OpenSSL MODULE REQUIRED)
+find_package(OpenSSL 1.1.1 MODULE REQUIRED)
 list(APPEND FOLLY_LINK_LIBRARIES ${OPENSSL_LIBRARIES})
 list(APPEND FOLLY_INCLUDE_DIRECTORIES ${OPENSSL_INCLUDE_DIR})
 list(APPEND CMAKE_REQUIRED_LIBRARIES ${OPENSSL_LIBRARIES})

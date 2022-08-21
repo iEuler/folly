@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -315,7 +315,6 @@ TEST(Singleton, SharedPtrUsage) {
 
   auto shared_s1 = weak_s1.lock();
   EXPECT_EQ(shared_s1.get(), s1);
-  EXPECT_EQ(shared_s1.use_count(), 2);
 
   auto old_serial = shared_s1->serial_number;
 
@@ -336,9 +335,7 @@ TEST(Singleton, SharedPtrUsage) {
     auto start_time = std::chrono::steady_clock::now();
     vault.destroyInstances();
     auto duration = std::chrono::steady_clock::now() - start_time;
-    EXPECT_TRUE(
-        duration > std::chrono::seconds{4} &&
-        duration < std::chrono::seconds{folly::kIsSanitizeAddress ? 30 : 6});
+    EXPECT_TRUE(duration > std::chrono::seconds{4});
   }
   EXPECT_EQ(vault.registeredSingletonCount(), 4);
   EXPECT_EQ(vault.livingSingletonCount(), 0);
@@ -763,8 +760,8 @@ TEST(Singleton, DoubleRegistrationLogging) {
   auto p = Subprocess(
       std::vector<std::string>{sub.string()},
       Subprocess::Options()
-          .stdinFd(Subprocess::CLOSE)
-          .stdoutFd(Subprocess::CLOSE)
+          .stdinFd(Subprocess::DEV_NULL)
+          .stdoutFd(Subprocess::DEV_NULL)
           .pipeStderr()
           .closeOtherFds());
   auto err = p.communicate("").second;
@@ -1094,4 +1091,67 @@ TEST(Singleton, ForkInChild) {
   EXPECT_DEATH(
       [&]() { vault.destroyInstances(); }(),
       "Attempting to destroy singleton .*ForkObject.* in child process");
+}
+
+struct EagerInitOnReenableSingletonsTag {};
+template <typename T, typename Tag = detail::DefaultTag>
+using SingletonEagerInitOnReenableSingletons =
+    Singleton<T, Tag, EagerInitOnReenableSingletonsTag>;
+
+TEST(Singleton, EagerInitOnReenableSingletons) {
+  struct CountingSingleton {
+    explicit CountingSingleton(int& counter) { ++counter; }
+  };
+
+  int counter1{0};
+  int counter2{0};
+  struct Tag1 {};
+  struct Tag2 {};
+
+  auto& vault = *SingletonVault::singleton<EagerInitOnReenableSingletonsTag>();
+  auto singleton1 =
+      SingletonEagerInitOnReenableSingletons<CountingSingleton, Tag1>([&] {
+        return new CountingSingleton(counter1);
+      }).shouldEagerInitOnReenable();
+  auto singleton2 =
+      SingletonEagerInitOnReenableSingletons<CountingSingleton, Tag2>([&] {
+        return new CountingSingleton(counter2);
+      }).shouldEagerInitOnReenable();
+  vault.registrationComplete();
+
+  EXPECT_EQ(0, counter1);
+  EXPECT_EQ(0, counter2);
+
+  singleton1.try_get();
+
+  EXPECT_EQ(1, counter1);
+  EXPECT_EQ(0, counter2);
+
+  vault.destroyInstances();
+  vault.reenableInstances();
+
+  EXPECT_EQ(2, counter1);
+  EXPECT_EQ(0, counter2);
+
+  singleton1.try_get();
+
+  EXPECT_EQ(2, counter1);
+  EXPECT_EQ(0, counter2);
+
+  vault.destroyInstances();
+  vault.reenableInstances();
+
+  EXPECT_EQ(3, counter1);
+  EXPECT_EQ(0, counter2);
+
+  singleton2.try_get();
+
+  EXPECT_EQ(3, counter1);
+  EXPECT_EQ(1, counter2);
+
+  vault.destroyInstances();
+  vault.reenableInstances();
+
+  EXPECT_EQ(4, counter1);
+  EXPECT_EQ(2, counter2);
 }

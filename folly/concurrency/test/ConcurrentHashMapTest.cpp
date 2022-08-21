@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ DEFINE_int64(seed, 0, "Seed for random number generators");
 
 template <typename T>
 class ConcurrentHashMapTest : public ::testing::Test {};
-TYPED_TEST_CASE_P(ConcurrentHashMapTest);
+TYPED_TEST_SUITE_P(ConcurrentHashMapTest);
 
 template <template <
     typename,
@@ -91,6 +91,7 @@ TYPED_TEST_P(ConcurrentHashMapTest, MapTest) {
   EXPECT_TRUE(foomap.insert_or_assign(2, 0).second);
   EXPECT_EQ(foomap.size(), 2);
   EXPECT_TRUE(foomap.assign_if_equal(2, 0, 3));
+  EXPECT_FALSE(foomap.assign_if(2, 4, [](auto&&) { return false; }));
   EXPECT_TRUE(foomap.insert(3, 0).second);
   EXPECT_FALSE(foomap.erase_if_equal(3, 1));
   EXPECT_TRUE(foomap.erase_if_equal(3, 0));
@@ -111,6 +112,10 @@ TYPED_TEST_P(ConcurrentHashMapTest, MapTest) {
   EXPECT_EQ(3, res->second);
   EXPECT_FALSE(foomap.empty());
   foomap.clear();
+  EXPECT_TRUE(foomap.empty());
+  EXPECT_TRUE(foomap.insert(3, 0).second);
+  EXPECT_FALSE(foomap.empty());
+  foomap.erase(3);
   EXPECT_TRUE(foomap.empty());
 }
 
@@ -266,6 +271,8 @@ TYPED_TEST_P(ConcurrentHashMapTest, MapMovableKeysTest) {
   EXPECT_TRUE(foomap.emplace(Movable(12), Movable(1)).second);
   EXPECT_TRUE(foomap.insert_or_assign(Movable(10), Movable(3)).second);
   EXPECT_TRUE(foomap.assign_if_equal(Movable(10), Movable(3), Movable(4)));
+  EXPECT_TRUE(
+      foomap.assign_if(Movable(10), Movable(5), [](auto&&) { return true; }));
   EXPECT_FALSE(foomap.try_emplace(Movable(10), Movable(3)).second);
   EXPECT_TRUE(foomap.try_emplace(Movable(13), Movable(3)).second);
 }
@@ -391,6 +398,27 @@ TYPED_TEST_P(ConcurrentHashMapTest, EraseInIterateTest) {
   for (auto it = foomap.cbegin(); it != foomap.cend(); ++it) {
     EXPECT_GE(3, it->second);
   }
+}
+
+TYPED_TEST_P(ConcurrentHashMapTest, AssignIfTest) {
+  CHM<uint64_t, uint64_t> foomap(3);
+  foomap.insert(1, 0);
+
+  bool canAssignFlag = false;
+  EXPECT_FALSE(
+      foomap.assign_if(1, 1, [canAssignFlag](auto&&) { return canAssignFlag; })
+          .has_value());
+
+  canAssignFlag = true;
+  auto f1 =
+      foomap.assign_if(1, 2, [canAssignFlag](auto&&) { return canAssignFlag; });
+  EXPECT_TRUE(f1.has_value());
+  EXPECT_EQ(2, f1.value()->second);
+
+  // Assign based on the current value.
+  auto f2 = foomap.assign_if(1, 3, [](auto&& val) { return val == 2; });
+  EXPECT_TRUE(f2.has_value());
+  EXPECT_EQ(3, f2.value()->second);
 }
 
 // TODO: hazptrs must support DeterministicSchedule
@@ -525,13 +553,36 @@ TYPED_TEST_P(ConcurrentHashMapTest, TryEmplaceEraseStressTest) {
   std::vector<std::thread> threads;
   unsigned int num_threads = 32;
   threads.reserve(num_threads);
-  folly::ConcurrentHashMap<int, int> map;
+  CHM<int, int> map;
   for (uint32_t t = 0; t < num_threads; t++) {
     threads.push_back(lib::thread([&]() {
       while (--iterations >= 0) {
         auto it = map.try_emplace(1, 101);
         map.erase(1);
         EXPECT_EQ(it.first->second, 101);
+      }
+    }));
+  }
+  for (auto& t : threads) {
+    join;
+  }
+}
+
+TYPED_TEST_P(ConcurrentHashMapTest, InsertOrAssignStressTest) {
+  DeterministicSchedule sched(DeterministicSchedule::uniform(FLAGS_seed));
+  std::atomic<int> iterations{10000};
+  std::vector<std::thread> threads;
+  unsigned int num_threads = 32;
+  threads.reserve(num_threads);
+  CHM<int, int> map;
+  for (uint32_t t = 0; t < num_threads; t++) {
+    threads.push_back(lib::thread([&]() {
+      int i = 0;
+      while (--iterations >= 0) {
+        auto res = map.insert_or_assign(0, ++i);
+        ASSERT_TRUE(res.second);
+        auto v = res.first->second;
+        ASSERT_EQ(v, i);
       }
     }));
   }
@@ -890,7 +941,7 @@ using detector_erase = decltype(std::declval<T>().erase(std::declval<Arg>()));
 TYPED_TEST_P(ConcurrentHashMapTest, HeterogeneousLookup) {
   using Hasher = folly::transparent<folly::hasher<folly::StringPiece>>;
   using KeyEqual = folly::transparent<std::equal_to<folly::StringPiece>>;
-  using M = ConcurrentHashMap<std::string, bool, Hasher, KeyEqual>;
+  using M = CHM<std::string, bool, Hasher, KeyEqual>;
 
   constexpr auto hello = "hello"_sp;
   constexpr auto buddy = "buddy"_sp;
@@ -925,7 +976,7 @@ TYPED_TEST_P(ConcurrentHashMapTest, HeterogeneousInsert) {
   using P = std::pair<StringPiece, std::string>;
   using CP = std::pair<const StringPiece, std::string>;
 
-  ConcurrentHashMap<std::string, std::string, Hasher, KeyEqual> map;
+  CHM<std::string, std::string, Hasher, KeyEqual> map;
   P p{"foo", "hello"};
   StringPiece foo{"foo"};
   StringPiece bar{"bar"};
@@ -962,6 +1013,11 @@ TYPED_TEST_P(ConcurrentHashMapTest, HeterogeneousInsert) {
   EXPECT_TRUE(mbIt);
   EXPECT_EQ(mbIt.value()->second, "hello");
   EXPECT_EQ(map[foo], "hello");
+  auto mbIt2 =
+      map.assign_if("foo", "hello2", [](auto&& val) { return val == "hello"; });
+  EXPECT_TRUE(mbIt);
+  EXPECT_EQ(mbIt2.value()->second, "hello2");
+  EXPECT_EQ(map[foo], "hello2");
   auto it = map.find(foo);
   map.erase(it);
   EXPECT_TRUE(map.empty());
@@ -985,7 +1041,97 @@ TYPED_TEST_P(ConcurrentHashMapTest, HeterogeneousInsert) {
       "there shouldn't be an erase() overload for this string map with an int param");
 }
 
-REGISTER_TYPED_TEST_CASE_P(
+TYPED_TEST_P(ConcurrentHashMapTest, InsertOrAssignIterator) {
+  CHM<int, int> map;
+  auto [itr1, insert1] = map.insert_or_assign(1, 1);
+  auto [itr2, insert2] = map.insert_or_assign(1, 2);
+  auto itr3 = map.find(1);
+  EXPECT_EQ(itr3->second, 2);
+  EXPECT_EQ(itr2->second, 2);
+}
+
+TYPED_TEST_P(ConcurrentHashMapTest, EraseClonedNonCopyable) {
+  // Using a non-copyable value type to use the node structure with an
+  // extra level of indirection to key-value items.
+  using Value = std::unique_ptr<int>;
+  // [TODO] Fix the SIMD version to pass this test, then change the
+  // map type to CHM.
+  ConcurrentHashMap<int, Value> map;
+  int cloned = 32; // The item that will end up being cloned.
+  for (int i = 0; i < cloned; i++) {
+    map.try_emplace(256 * i, std::make_unique<int>(0));
+  }
+  auto [iter, _] = map.try_emplace(256 * cloned, std::make_unique<int>(0));
+  // Add more items to cause rehash that clones the item.
+  int num = 10000;
+  for (int i = cloned + 1; i < num; i++) {
+    map.try_emplace(256 * i, std::make_unique<int>(0));
+  }
+  // Erase items to invoke hazard pointer asynchronous reclamation.
+  for (int i = 0; i < num; i++) {
+    map.erase(256 * i);
+  }
+  // The cloned node and the associated key-value item should still be
+  // protected by iter from being reclaimed.
+  EXPECT_EQ(iter->first, 256 * cloned);
+}
+
+TYPED_TEST_P(ConcurrentHashMapTest, ConcurrentInsertClear) {
+  DeterministicSchedule sched(DeterministicSchedule::uniform(FLAGS_seed));
+
+  /* 8192 and 8x / 9x multipliers are values that tend to reproduce
+   * race condition (fixed by this change) more frequently.
+   * Test keeps CHM size limited to chm_max_size and clear() if it exceeds.
+   * Key space for CHM is limited to chm_max_key and exceeds max size by
+   * small margin.
+   * Test imitates serial traversal over key space by multiple threads,
+   * triggering clear() by multiple threads at once.
+   */
+  constexpr unsigned long chm_base_size = 8192;
+  constexpr unsigned long chm_max_size = chm_base_size * 8;
+  constexpr unsigned long chm_max_key = chm_base_size * 9;
+  CHM<unsigned long,
+      unsigned long,
+      std::hash<unsigned long>,
+      std::equal_to<unsigned long>,
+      std::allocator<uint8_t>,
+      8,
+      Atom,
+      Mutex>
+      m(chm_base_size);
+
+  std::vector<std::thread> threads;
+  /* 32 threads and 50k rounds are a compromise between trying to create
+   * race conditions in insert()/clear(), and finishing test in reasonable
+   * time */
+  constexpr int load_divisor = folly::kIsSanitizeThread ? 4 : 1;
+  constexpr size_t num_threads = 32 / load_divisor;
+  constexpr size_t rounds_per_thread = 50000 / load_divisor;
+  threads.reserve(num_threads);
+  for (size_t t = 0; t < num_threads; t++) {
+    threads.emplace_back([&, t]() {
+      for (size_t i = 0; i < rounds_per_thread; ++i) {
+        /* Code simulates traversal over whole key space by all threads
+         * combined, with each thread contributing to semi-unique set of keys.
+         * Each thread is assigned its own key sequence,
+         * with thread_X traversing values X, 32+X, 32*2+X, 32*3+X, ...
+         * 32*N+X mod chm_max_key.
+         */
+        const unsigned long k = (i * num_threads + t) % chm_max_key;
+        if (m.size() >= chm_max_size) {
+          m.clear();
+        }
+        m.insert_or_assign(k, k);
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    join;
+  }
+}
+
+REGISTER_TYPED_TEST_SUITE_P(
     ConcurrentHashMapTest,
     MapTest,
     MaxSizeTest,
@@ -1011,10 +1157,12 @@ REGISTER_TYPED_TEST_CASE_P(
     EraseIfEqualTest,
     EraseIfTest,
     EraseInIterateTest,
+    AssignIfTest,
     EraseStressTest,
     EraseTest,
     ForEachLoop,
     TryEmplaceEraseStressTest,
+    InsertOrAssignStressTest,
     IterateStressTest,
     RefcountTest,
     UpdateStressTest,
@@ -1023,7 +1171,10 @@ REGISTER_TYPED_TEST_CASE_P(
     IteratorMove,
     IteratorLoop,
     HeterogeneousLookup,
-    HeterogeneousInsert);
+    HeterogeneousInsert,
+    InsertOrAssignIterator,
+    EraseClonedNonCopyable,
+    ConcurrentInsertClear);
 
 using folly::detail::concurrenthashmap::bucket::BucketTable;
 
@@ -1035,5 +1186,5 @@ typedef ::testing::Types<MapFactory<BucketTable>, MapFactory<SIMDTable>>
 typedef ::testing::Types<MapFactory<BucketTable>> MapFactoryTypes;
 #endif
 
-INSTANTIATE_TYPED_TEST_CASE_P(
+INSTANTIATE_TYPED_TEST_SUITE_P(
     MapFactoryTypesInstantiation, ConcurrentHashMapTest, MapFactoryTypes);

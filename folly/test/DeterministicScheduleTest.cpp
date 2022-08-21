@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,12 @@
 
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+#include <folly/synchronization/AtomicUtil.h>
 
 using namespace folly::test;
+
+static_assert(
+    std::is_same_v<int, folly::atomic_value_type_t<DeterministicAtomic<int>>>);
 
 TEST(DeterministicSchedule, uniform) {
   auto p = DeterministicSchedule::uniform(0);

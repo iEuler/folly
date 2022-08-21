@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,7 @@ namespace folly {
 // generic TimerFD based timeout manager
 class TimerFDTimeoutManager : public TimerFD {
  public:
-  using UniquePtr =
-      std::unique_ptr<TimerFDTimeoutManager, DelayedDestruction::Destructor>;
+  using UniquePtr = DelayedDestructionUniquePtr<TimerFDTimeoutManager>;
   using SharedPtr = std::shared_ptr<TimerFDTimeoutManager>;
 
  public:

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -102,41 +102,6 @@ int setpriority(int which, int who, int value) {
     return -1;
   }
   return 0;
-}
-}
-
-#elif defined(__XROS__)
-
-#include <xr/thread.h> // @manual
-
-extern "C" {
-
-int getrlimit(int type, rlimit* dst) {
-  if (type == RLIMIT_STACK) {
-    // NOTE: This limit is a conservative estimate.
-    dst->rlim_cur = c_xr_thread_default_stack_size;
-    dst->rlim_max = c_xr_thread_default_stack_size;
-    return 0;
-  }
-  return -1;
-}
-
-int getrusage(int /* who */, rusage* usage) {
-  std::memset(usage, 0, sizeof(rusage));
-  return 0;
-}
-
-int setrlimit(int /* type */, rlimit* /* src */) {
-  return 0;
-}
-
-int getpriority(int /* which */, int /* who */) {
-  // 20 is the default `nice` priority, report it.
-  return 20;
-}
-
-int setpriority(int /* which */, int /* who */, int /* value */) {
-  return -1;
 }
 }
 

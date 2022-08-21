@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@
 #include <folly/String.h>
 #include <folly/io/async/EventBaseAtomicNotificationQueue.h>
 #include <folly/io/async/EventBaseBackendBase.h>
+#include <folly/io/async/EventBaseLocal.h>
 #include <folly/io/async/VirtualEventBase.h>
 #include <folly/portability/Unistd.h>
 #include <folly/synchronization/Baton.h>
@@ -197,21 +198,42 @@ EventBase::~EventBase() {
 
   DCHECK_EQ(0u, runBeforeLoopCallbacks_.size());
 
-  (void)runLoopCallbacks();
+  runLoopCallbacks();
 
   queue_->drain();
 
   // Stop consumer before deleting NotificationQueue
   queue_->stopConsuming();
 
-  for (auto storage : localStorageToDtor_) {
-    storage->onEventBaseDestruction(*this);
+  // Remove self from all registered EventBaseLocal instances.
+  // Notice that we could be racing with EventBaseLocal dtor similarly
+  // deregistering itself from all registered EventBase instances. Because
+  // both sides need to acquire two locks, but in inverse order, we retry if
+  // inner lock acquisition fails to prevent lock inversion deadlock.
+  while (true) {
+    auto locked = localStorageToDtor_.wlock();
+    if (locked->empty()) {
+      break;
+    }
+    auto evbl = *locked->begin();
+    if (evbl->tryDeregister(*this)) {
+      locked->erase(evbl);
+    }
   }
   localStorage_.clear();
 
   evb_.reset();
 
   VLOG(5) << "EventBase(): Destroyed.";
+}
+
+bool EventBase::tryDeregister(detail::EventBaseLocalBase& evbl) {
+  if (auto locked = localStorageToDtor_.tryWLock()) {
+    locked->erase(&evbl);
+    runInEventBaseThread([this, key = evbl.key_] { localStorage_.erase(key); });
+    return true;
+  }
+  return false;
 }
 
 std::unique_ptr<EventBaseBackendBase> EventBase::getDefaultBackend() {
@@ -299,6 +321,24 @@ bool EventBase::loopOnce(int flags) {
 }
 
 bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
+  loopMainSetup();
+  SCOPE_EXIT { loopMainCleanup(); };
+  return loopMain(flags, ignoreKeepAlive);
+}
+
+void EventBase::loopPollSetup() {
+  loopMainSetup();
+}
+
+bool EventBase::loopPoll() {
+  return loopMain(EVLOOP_ONCE | EVLOOP_NONBLOCK, true);
+}
+
+void EventBase::loopPollCleanup() {
+  loopMainCleanup();
+}
+
+void EventBase::loopMainSetup() {
   VLOG(5) << "EventBase(): Starting loop.";
 
   const char* message =
@@ -312,18 +352,6 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
   LOG_IF(DFATAL, invokingLoop_) << message;
 
   invokingLoop_ = true;
-  SCOPE_EXIT { invokingLoop_ = false; };
-
-  int res = 0;
-  bool ranLoopCallbacks;
-  bool blocking = !(flags & EVLOOP_NONBLOCK);
-  bool once = (flags & EVLOOP_ONCE);
-
-  // time-measurement variables.
-  std::chrono::steady_clock::time_point prev;
-  std::chrono::steady_clock::time_point idleStart = {};
-  std::chrono::microseconds busy;
-  std::chrono::microseconds idle;
 
   auto const prevLoopThread = loopThread_.exchange(
       std::this_thread::get_id(), std::memory_order_release);
@@ -335,6 +363,19 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
   if (!name_.empty()) {
     setThreadName(name_);
   }
+}
+
+bool EventBase::loopMain(int flags, bool ignoreKeepAlive) {
+  int res = 0;
+  bool ranLoopCallbacks;
+  bool blocking = !(flags & EVLOOP_NONBLOCK);
+  bool once = (flags & EVLOOP_ONCE);
+
+  // time-measurement variables.
+  std::chrono::steady_clock::time_point prev;
+  std::chrono::steady_clock::time_point idleStart = {};
+  std::chrono::microseconds busy;
+  std::chrono::microseconds idle;
 
   if (enableTimeMeasurement_) {
     prev = std::chrono::steady_clock::now();
@@ -391,13 +432,18 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
                << " notificationQueueSize: " << getNotificationQueueSize()
                << " nothingHandledYet(): " << nothingHandledYet();
 
-      // see if our average loop time has exceeded our limit
-      if ((maxLatency_ > std::chrono::microseconds::zero()) &&
-          (maxLatencyLoopTime_.get() > double(maxLatency_.count()))) {
-        maxLatencyCob_();
-        // back off temporarily -- don't keep spamming maxLatencyCob_
-        // if we're only a bit over the limit
-        maxLatencyLoopTime_.dampen(0.9);
+      if (maxLatency_ > std::chrono::microseconds::zero()) {
+        // see if our average loop time has exceeded our limit
+        if (dampenMaxLatency_ &&
+            (maxLatencyLoopTime_.get() > double(maxLatency_.count()))) {
+          maxLatencyCob_();
+          // back off temporarily -- don't keep spamming maxLatencyCob_
+          // if we're only a bit over the limit
+          maxLatencyLoopTime_.dampen(0.9);
+        } else if (!dampenMaxLatency_ && busy > maxLatency_) {
+          // If no damping, we compare the raw busy time
+          maxLatencyCob_();
+        }
       }
 
       // Our loop run did real work; reset the idle timer
@@ -432,8 +478,6 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
       break;
     }
   }
-  // Reset stop_ so loop() can be called again
-  stop_.store(false, std::memory_order_relaxed);
 
   if (res < 0) {
     LOG(ERROR) << "EventBase: -- error in event loop, res = " << res;
@@ -444,11 +488,15 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
     LOG(ERROR) << "EventBase: unknown event loop result = " << res;
     return false;
   }
-
-  loopThread_.store({}, std::memory_order_release);
-
   VLOG(5) << "EventBase(): Done with loop.";
   return true;
+}
+
+void EventBase::loopMainCleanup() {
+  // Reset stop_ so that the main loop sequence can be called again.
+  stop_.store(false, std::memory_order_relaxed);
+  loopThread_.store({}, std::memory_order_release);
+  invokingLoop_ = false;
 }
 
 ssize_t EventBase::loopKeepAliveCount() {
@@ -522,6 +570,8 @@ void EventBase::bumpHandlingTime() {
 void EventBase::terminateLoopSoon() {
   VLOG(5) << "EventBase(): Received terminateLoopSoon() command.";
 
+  auto keepAlive = getKeepAliveToken(this);
+
   // Set stop to true, so the event loop will know to exit.
   stop_.store(true, std::memory_order_relaxed);
 
@@ -531,7 +581,7 @@ void EventBase::terminateLoopSoon() {
   // receives another event.  Send an empty frame to the notification queue
   // so that the event loop will wake up even if there are no other events.
   try {
-    queue_->putMessage([&] { evb_->eb_event_base_loopbreak(); });
+    queue_->putMessage([] {});
   } catch (...) {
     // putMessage() can only fail when the queue is draining in ~EventBase.
   }
@@ -641,6 +691,14 @@ void EventBase::runImmediatelyOrRunInEventBaseThreadAndWait(Func fn) noexcept {
   }
 }
 
+void EventBase::runImmediatelyOrRunInEventBaseThread(Func fn) noexcept {
+  if (isInEventBaseThread()) {
+    fn();
+  } else {
+    runInEventBaseThreadAlwaysEnqueue(std::move(fn));
+  }
+}
+
 void EventBase::runLoopCallbacks(LoopCallbackList& currentCallbacks) {
   while (!currentCallbacks.empty()) {
     LoopCallback* callback = &currentCallbacks.front();
@@ -693,7 +751,7 @@ void EventBase::initNotificationQueue() {
 
 void EventBase::SmoothLoopTime::setTimeInterval(
     std::chrono::microseconds timeInterval) {
-  expCoeff_ = -1.0 / timeInterval.count();
+  expCoeff_ = -1.0 / static_cast<double>(timeInterval.count());
   VLOG(11) << "expCoeff_ " << expCoeff_ << " " << __PRETTY_FUNCTION__;
 }
 
@@ -706,9 +764,10 @@ void EventBase::SmoothLoopTime::addSample(
   if ((buffer_time_ + total) > buffer_interval_ && buffer_cnt_ > 0) {
     // See https://en.wikipedia.org/wiki/Exponential_smoothing for
     // more info on this calculation.
-    double coeff = exp(buffer_time_.count() * expCoeff_);
-    value_ =
-        value_ * coeff + (1.0 - coeff) * (busy_buffer_.count() / buffer_cnt_);
+    double coeff = exp(static_cast<double>(buffer_time_.count()) * expCoeff_);
+    value_ = value_ * coeff +
+        (1.0 - coeff) *
+            (static_cast<double>(busy_buffer_.count()) / buffer_cnt_);
     buffer_time_ = std::chrono::microseconds{0};
     busy_buffer_ = std::chrono::microseconds{0};
     buffer_cnt_ = 0;

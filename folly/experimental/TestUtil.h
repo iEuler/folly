@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ class TemporaryFile {
     scope_ = other.scope_;
     closeOnDestruction_ = other.closeOnDestruction_;
     fd_ = std::exchange(other.fd_, -1);
-    path_ = other.path_;
+    path_ = std::exchange(other.path_, fs::path());
   }
 };
 
@@ -253,6 +253,14 @@ class CaptureFD {
 
   off_t readOffset_; // for incremental reading
 };
+
+//  find_resource
+//
+//  Finds the file path of a resource which was built alongside a test binary.
+//
+//  Care must be taken to set up the test and resource build rules in accordance
+//  with this function.
+fs::path find_resource(const std::string& resource);
 
 } // namespace test
 } // namespace folly

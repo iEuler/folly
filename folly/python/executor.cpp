@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,26 +18,23 @@
 
 #include <stdexcept>
 
-#include <folly/CppAttributes.h>
-#include <folly/python/AsyncioExecutor.h>
 #include <folly/python/executor_api.h> // @manual
+#include <folly/python/import.h>
 
 namespace folly {
 namespace python {
 
-namespace {
-
-void do_import() {
-  if (0 != import_folly__executor()) {
-    throw std::runtime_error("import_folly__executor failed");
-  }
-}
-
-} // namespace
+FOLLY_CONSTINIT static import_cache import_folly__executor_{
+    import_folly__executor, "import_folly__executor"};
 
 folly::Executor* getExecutor() {
-  FOLLY_MAYBE_UNUSED static bool done = (do_import(), false);
+  import_folly__executor_();
   return get_running_executor(false); // TODO: fried set this to true
+}
+
+int setExecutorForLoop(PyObject* loop, AsyncioExecutor* executor) {
+  import_folly__executor_();
+  return set_executor_for_loop(loop, executor);
 }
 
 } // namespace python

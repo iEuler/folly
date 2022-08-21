@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #pragma once
 #define FOLLY_EXPERIMENTAL_SYMBOLIZER_ELF_H_
 
+#include <fcntl.h>
 #include <cstdio>
 #include <initializer_list>
 #include <stdexcept>
@@ -50,13 +51,23 @@ using ElfOff = FOLLY_ELF_ELFW(Off);
 using ElfPhdr = FOLLY_ELF_ELFW(Phdr);
 using ElfShdr = FOLLY_ELF_ELFW(Shdr);
 using ElfSym = FOLLY_ELF_ELFW(Sym);
+using ElfRel = FOLLY_ELF_ELFW(Rel);
+using ElfRela = FOLLY_ELF_ELFW(Rela);
+
+// ElfFileId is supposed to uniquely identify any instance of an ELF binary.
+// It does that by using file's inode, dev ID, size and modification time:
+// <dev, inode, size in bytes, mod time>
+// Just using dev, inode is not unique enough, because the file can
+// be overwritten with new contents, but will keep same dev and inode, so
+// we take into account modification time and file size to minimize risk.
+using ElfFileId = std::tuple<dev_t, ino_t, off_t, uint64_t>;
 
 /**
  * ELF file parser.
  *
  * We handle native files only (32-bit files on a 32-bit platform, 64-bit files
  * on a 64-bit platform), and only executables (ET_EXEC) shared objects
- * (ET_DYN) and core files (ET_CORE).
+ * (ET_DYN), core files (ET_CORE) and relocatable file (ET_REL).
  */
 class ElfFile {
  public:
@@ -185,7 +196,7 @@ class ElfFile {
       noexcept(is_nothrow_invocable_v<Fn, ElfShdr const&>);
 
   /**
-   * Iterate over all symbols witin a given section.
+   * Iterate over all symbols within a given section.
    *
    * Returns a pointer to the current ("found") symbol when fn returned true,
    * or nullptr if fn returned false for all symbols.
@@ -202,6 +213,17 @@ class ElfFile {
       const ElfShdr& section,
       std::initializer_list<uint32_t> types,
       Fn fn) const noexcept(is_nothrow_invocable_v<Fn, ElfSym const&>);
+
+  /**
+   * Iterate over entries within a given section.
+   *
+   * Returns a pointer to the current ("found") entry when fn returned
+   * true, or nullptr if fn returned false for all entries.
+   */
+  template <typename E>
+  const E* iterateSectionEntries(
+      const ElfShdr& section, std::function<bool(const E&)> fn) const
+      noexcept(is_nothrow_invocable_v<E const&>);
 
   /**
    * Find symbol definition by address.
@@ -243,7 +265,7 @@ class ElfFile {
    *
    *  auto sym = getSymbolByName("someGlobalValue");
    *  auto addr = getSymbolValue<ElfAddr>(sym.second);
-   *  const char* str = &getSymbolValue<const char>(addr);
+   *  const char* str = &getAddressValue<const char>(addr);
    */
   template <class T>
   const T& getAddressValue(const ElfAddr addr) const noexcept {
@@ -261,6 +283,19 @@ class ElfFile {
   /** Find the section containing the given address */
   const ElfShdr* getSectionContainingAddress(ElfAddr addr) const noexcept;
 
+  const char* filepath() const { return filepath_; }
+
+  const ElfFileId& getFileId() const { return fileId_; }
+
+  /**
+   * Announce an intention to access file data in a specific pattern in the
+   * future. https://man7.org/linux/man-pages/man2/posix_fadvise.2.html
+   */
+  std::pair<const int, char const*> posixFadvise(
+      off_t offset, off_t len, int const advice) const noexcept;
+  std::pair<const int, char const*> posixFadvise(
+      int const advice) const noexcept;
+
  private:
   OpenResult init() noexcept;
   void reset() noexcept;
@@ -271,7 +306,9 @@ class ElfFile {
 
   template <class T>
   const T& at(ElfOff offset) const noexcept {
-    static_assert(std::is_pod<T>::value, "non-pod");
+    static_assert(
+        std::is_standard_layout<T>::value && std::is_trivial<T>::value,
+        "non-pod");
     FOLLY_SAFE_CHECK(
         offset + sizeof(T) <= length_,
         "Offset (",
@@ -313,6 +350,7 @@ class ElfFile {
   int fd_;
   char* file_; // mmap() location
   size_t length_; // mmap() length
+  ElfFileId fileId_;
 
   uintptr_t baseAddress_;
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1060,7 +1060,7 @@ void AutomaticCodecTest::runSimpleTest(const DataHolder& dh) {
     auto rest = compressed->clone();
     split->trimEnd(split->length() - i);
     rest->trimStart(i);
-    split->appendChain(std::move(rest));
+    split->insertAfterThisOne(std::move(rest));
     auto uncompressed = auto_->uncompress(split.get(), uncompressedLength);
     EXPECT_EQ(uncompressedLength, uncompressed->computeChainDataLength());
     EXPECT_EQ(dh.hash(uncompressedLength), hashIOBuf(uncompressed.get()));
@@ -1145,7 +1145,7 @@ class CustomCodec : public Codec {
 
   std::unique_ptr<IOBuf> doCompress(const IOBuf* data) override {
     auto result = IOBuf::copyBuffer(prefix_);
-    result->appendChain(codec_->compress(data));
+    result->appendToChain(codec_->compress(data));
     EXPECT_TRUE(canUncompress(result.get(), data->computeChainDataLength()));
     return result;
   }

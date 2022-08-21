@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -246,6 +246,13 @@ class AsyncUDPServerSocket : private AsyncUDPSocket::ReadCallback,
     applyEventCallback();
   }
 
+  void setRecvmsgMultishotCallback(EventRecvmsgMultishotCallback* cb) {
+    multishotCb_ = cb;
+    applyEventCallback();
+  }
+
+  bool setTimestamping(int val) { return socket_->setTimestamping(val); }
+
  private:
   // AsyncUDPSocket::ReadCallback
   void getReadBuffer(void** buf, size_t* len) noexcept override {
@@ -325,6 +332,8 @@ class AsyncUDPServerSocket : private AsyncUDPSocket::ReadCallback,
     if (socket_) {
       if (eventCb_) {
         socket_->setEventCallback(eventCb_);
+      } else if (multishotCb_) {
+        socket_->setRecvmsgMultishotCallback(multishotCb_);
       } else {
         socket_->resetEventCallback();
       }
@@ -352,6 +361,7 @@ class AsyncUDPServerSocket : private AsyncUDPSocket::ReadCallback,
   bool reuseAddr_{false};
 
   EventRecvmsgCallback* eventCb_{nullptr};
+  EventRecvmsgMultishotCallback* multishotCb_{nullptr};
 };
 
 } // namespace folly

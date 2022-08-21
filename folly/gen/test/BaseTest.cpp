@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1170,6 +1170,15 @@ TEST(Gen, Guard) {
           return true; // continue
         })
       | eachTo<int>()
+      | sum);
+  EXPECT_EQ(
+      4,
+      from({"1", "a", "3", "99"})
+      | guard<runtime_error>([](runtime_error&, const char*) {
+          return true; // continue
+        })
+      | eachTo<int>()
+      | take(2) // Ensure take() is respected.
       | sum);
   EXPECT_EQ(
       1,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,10 +17,11 @@
 #include <cstring>
 
 #if !defined(__AVX2__)
-
+extern "C" {
 void* __folly_memcpy(
     void* __restrict dst, const void* __restrict src, size_t size) {
   return std::memcpy(dst, src, size);
+}
 }
 
 #endif

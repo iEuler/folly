@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1738,3 +1738,15 @@ TEST(FBString, convertToStringView) {
   EXPECT_EQ(sv2, "bar");
 }
 #endif
+
+TEST(FBString, Format) {
+  EXPECT_EQ("  foo", fmt::format("{:>5}", folly::fbstring("foo")));
+}
+
+TEST(FBString, OverLarge) {
+  EXPECT_THROW(
+      fbstring().reserve((size_t)0xFFFF'FFFF'FFFF'FFFF), std::length_error);
+  EXPECT_THROW(
+      fbstring_core<char32_t>().reserve((size_t)0x4000'0000'4000'0000),
+      std::length_error);
+}

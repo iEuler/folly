@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 
 #include <glog/logging.h>
 
-#include <folly/detail/AtFork.h>
+#include <folly/system/AtFork.h>
 
 namespace folly {
 
@@ -66,7 +66,7 @@ class PidCache {
     pid_t pid = getpid();
     auto s = state_.load();
     if (s == State::INVALID && state_.cas(s, State::LOCKED)) {
-      folly::detail::AtFork::registerHandler(
+      folly::AtFork::registerHandler(
           this, [] { return true; }, [] {}, [this] { pid_ = getpid(); });
       pid_ = pid;
       state_.store(State::VALID);

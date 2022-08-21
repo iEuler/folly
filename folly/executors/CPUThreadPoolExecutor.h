@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@
 
 #include <array>
 
-#include <folly/concurrency/QueueObserver.h>
+#include <folly/executors/QueueObserver.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 
-DECLARE_bool(dynamic_cputhreadpoolexecutor);
+FOLLY_GFLAGS_DECLARE_bool(dynamic_cputhreadpoolexecutor);
 
 namespace folly {
 
@@ -105,9 +105,10 @@ class CPUThreadPoolExecutor : public ThreadPoolExecutor {
       std::shared_ptr<ThreadFactory> threadFactory,
       Options opt = {});
 
-  CPUThreadPoolExecutor(
+  explicit CPUThreadPoolExecutor(
       std::pair<size_t, size_t> numThreads,
-      std::shared_ptr<ThreadFactory> threadFactory,
+      std::shared_ptr<ThreadFactory> threadFactory =
+          std::make_shared<NamedThreadFactory>("CPUThreadPool"),
       Options opt = {});
 
   CPUThreadPoolExecutor(
@@ -134,7 +135,7 @@ class CPUThreadPoolExecutor : public ThreadPoolExecutor {
       Func expireCallback = nullptr) override;
 
   void addWithPriority(Func func, int8_t priority) override;
-  void add(
+  virtual void add(
       Func func,
       int8_t priority,
       std::chrono::milliseconds expiration,
@@ -175,6 +176,8 @@ class CPUThreadPoolExecutor : public ThreadPoolExecutor {
 
  protected:
   BlockingQueue<CPUTask>* getTaskQueue();
+  std::unique_ptr<ThreadIdWorkerProvider> threadIdCollector_{
+      std::make_unique<ThreadIdWorkerProvider>()};
 
  private:
   void threadRun(ThreadPtr thread) override;

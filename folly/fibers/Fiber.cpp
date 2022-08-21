@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,10 +57,6 @@ void Fiber::resume() {
   DCHECK_EQ(state_, AWAITING);
   state_ = READY_TO_RUN;
 
-  if (fiberManager_.observer_) {
-    fiberManager_.observer_->runnable(reinterpret_cast<uintptr_t>(this));
-  }
-
   if (LIKELY(threadId_ == localThreadId())) {
     fiberManager_.readyFibers_.push_back(*this);
     fiberManager_.ensureLoopScheduled();
@@ -75,6 +71,10 @@ Fiber::Fiber(FiberManager& fiberManager)
       fiberStackLimit_(fiberManager_.stackAllocator_.allocate(fiberStackSize_)),
       fiberImpl_([this] { fiberFunc(); }, fiberStackLimit_, fiberStackSize_) {
   fiberManager_.allFibers_.push_back(*this);
+
+#ifdef FOLLY_SANITIZE_THREAD
+  tsanCtx_ = __tsan_create_fiber(0);
+#endif
 }
 
 void Fiber::init(bool recordStackUsed) {
@@ -110,6 +110,11 @@ Fiber::~Fiber() {
   }
   fiberManager_.unpoisonFiberStack(this);
 #endif
+
+#ifdef FOLLY_SANITIZE_THREAD
+  __tsan_destroy_fiber(tsanCtx_);
+#endif
+
   fiberManager_.stackAllocator_.deallocate(fiberStackLimit_, fiberStackSize_);
 }
 
@@ -222,18 +227,12 @@ Fiber::LocalData& Fiber::LocalData::operator=(const LocalData& other) {
     return *this;
   }
 
-  dataSize_ = other.dataSize_;
-  dataType_ = other.dataType_;
-  dataDestructor_ = other.dataDestructor_;
-  dataCopyConstructor_ = other.dataCopyConstructor_;
-
-  if (dataSize_ <= kBufferSize) {
-    data_ = &buffer_;
+  vtable_ = other.vtable_;
+  if (other.data_ == &other.buffer_) {
+    data_ = vtable_.ctor_copy(&buffer_, other.data_);
   } else {
-    data_ = allocateHeapBuffer(dataSize_);
+    data_ = vtable_.make_copy(other.data_);
   }
-
-  dataCopyConstructor_(data_, other.data_);
 
   return *this;
 }
@@ -243,16 +242,14 @@ void Fiber::LocalData::reset() {
     return;
   }
 
-  dataDestructor_(data_);
+  if (data_ == &buffer_) {
+    vtable_.dtor(data_);
+  } else {
+    vtable_.ruin(data_);
+  }
+  vtable_ = {};
   data_ = nullptr;
 }
 
-void* Fiber::LocalData::allocateHeapBuffer(size_t size) {
-  return new char[size];
-}
-
-void Fiber::LocalData::freeHeapBuffer(void* buffer) {
-  delete[] reinterpret_cast<char*>(buffer);
-}
 } // namespace fibers
 } // namespace folly

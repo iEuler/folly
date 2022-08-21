@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,17 @@
 #pragma once
 
 #include <folly/Executor.h>
+#include <folly/python/AsyncioExecutor.h>
 
 namespace folly {
 namespace python {
 
 folly::Executor* getExecutor();
+
+// Returns -1 if an executor was already set for loop, 0 otherwise. A NULL
+// executor clears the current executor (caller is responsible for freeing
+// any existing executor).
+int setExecutorForLoop(PyObject* loop, AsyncioExecutor* executor);
 
 } // namespace python
 } // namespace folly

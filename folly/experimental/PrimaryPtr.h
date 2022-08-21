@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -164,9 +164,6 @@ class PrimaryPtr {
   // was called or the cleanup() task was started (even if the call to join()
   // hasn't returned yet and the cleanup() task has not completed yet).
   std::shared_ptr<T> lock() const {
-    if (!*this) {
-      return nullptr;
-    }
     if (auto outerPtr = outerPtrWeak_.lock()) {
       return *outerPtr;
     }

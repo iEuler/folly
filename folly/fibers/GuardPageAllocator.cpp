@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -230,8 +230,14 @@ void sigsegvSignalHandler(int signum, siginfo_t* info, void* ucontext) {
     return;
   }
 
-  // Let the old signal handler handle the signal.
-  raise(signum);
+  // Let the old signal handler handle the signal. Invoke this synchronously
+  // within our own signal handler to ensure that the kernel siginfo context
+  // is not lost.
+  if (oldSigsegvAction.sa_flags & SA_SIGINFO) {
+    oldSigsegvAction.sa_sigaction(signum, info, ucontext);
+  } else {
+    oldSigsegvAction.sa_handler(signum);
+  }
 }
 
 bool isInJVM() {

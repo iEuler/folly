@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include <folly/json.h>
 
+#include <cstdint>
 #include <iterator>
 #include <limits>
 
@@ -29,15 +30,20 @@ using folly::json::parse_error;
 using folly::json::print_error;
 
 TEST(Json, Unicode) {
-  auto val = parseJson(u8"\"I \u2665 UTF-8\"");
-  EXPECT_EQ(u8"I \u2665 UTF-8", val.asString());
+  auto val = parseJson(reinterpret_cast<const char*>(u8"\"I \u2665 UTF-8\""));
+  EXPECT_EQ(reinterpret_cast<const char*>(u8"I \u2665 UTF-8"), val.asString());
   val = parseJson("\"I \\u2665 UTF-8\"");
-  EXPECT_EQ(u8"I \u2665 UTF-8", val.asString());
-  val = parseJson(u8"\"I \U0001D11E playing in G-clef\"");
-  EXPECT_EQ(u8"I \U0001D11E playing in G-clef", val.asString());
+  EXPECT_EQ(reinterpret_cast<const char*>(u8"I \u2665 UTF-8"), val.asString());
+  val = parseJson(
+      reinterpret_cast<const char*>(u8"\"I \U0001D11E playing in G-clef\""));
+  EXPECT_EQ(
+      reinterpret_cast<const char*>(u8"I \U0001D11E playing in G-clef"),
+      val.asString());
 
   val = parseJson("\"I \\uD834\\uDD1E playing in G-clef\"");
-  EXPECT_EQ(u8"I \U0001D11E playing in G-clef", val.asString());
+  EXPECT_EQ(
+      reinterpret_cast<const char*>(u8"I \U0001D11E playing in G-clef"),
+      val.asString());
 }
 
 TEST(Json, Parse) {
@@ -343,6 +349,53 @@ TEST(Json, TestLineNumbers) {
   map.clear();
 }
 
+TEST(Json, DuplicateKeys) {
+  dynamic obj = dynamic::object("a", 1);
+  EXPECT_EQ(obj, parseJson("{\"a\": 1}"));
+
+  // Default behavior keeps *last* value.
+  EXPECT_EQ(obj, parseJson("{\"a\": 2, \"a\": 1}"));
+  EXPECT_THROW(
+      parseJson("{\"a\": 2, \"a\": 1}", {.validate_keys = true}), parse_error);
+}
+
+TEST(Json, ParseConvertInt) {
+  EXPECT_THROW(parseJson("{2: 4}"), parse_error);
+  dynamic obj = dynamic::object("2", 4);
+  EXPECT_EQ(obj, parseJson("{2: 4}", {.convert_int_keys = true}));
+  EXPECT_THROW(
+      parseJson("{2: 4, \"2\": 5}", {.convert_int_keys = true}), parse_error);
+  EXPECT_THROW(
+      parseJson("{2: 4, 2: 5}", {.convert_int_keys = true}), parse_error);
+}
+
+TEST(Json, PrintConvertInt) {
+  dynamic obj = dynamic::object(2, 4);
+  EXPECT_THROW(toJson(obj), print_error);
+  EXPECT_EQ(
+      "{2:4}", folly::json::serialize(obj, {.allow_non_string_keys = true}));
+  EXPECT_EQ(
+      "{\"2\":4}", folly::json::serialize(obj, {.convert_int_keys = true}));
+  EXPECT_EQ(
+      "{\"2\":4}",
+      folly::json::serialize(
+          obj,
+          {
+              .allow_non_string_keys = true,
+              .convert_int_keys = true,
+          }));
+
+  obj["2"] = 5; // Would lead to duplicate keys in output JSON.
+  EXPECT_THROW(
+      folly::json::serialize(
+          obj,
+          {
+              .allow_non_string_keys = true,
+              .convert_int_keys = true,
+          }),
+      print_error);
+}
+
 TEST(Json, ParseTrailingComma) {
   folly::json::serialization_opts on, off;
   on.allow_trailing_comma = true;
@@ -568,7 +621,7 @@ TEST(Json, JsonNonAsciiEncoding) {
 
 TEST(Json, UTF8Retention) {
   // test retention with valid utf8 strings
-  std::string input = u8"\u2665";
+  std::string input = reinterpret_cast<const char*>(u8"\u2665");
   std::string jsonInput = folly::toJson(input);
   std::string output = folly::parseJson(jsonInput).asString();
   std::string jsonOutput = folly::toJson(output);
@@ -587,7 +640,7 @@ TEST(Json, UTF8EncodeNonAsciiRetention) {
   opts.encode_non_ascii = true;
 
   // test encode_non_ascii valid utf8 strings
-  std::string input = u8"\u2665";
+  std::string input = reinterpret_cast<const char*>(u8"\u2665");
   std::string jsonInput = folly::json::serialize(input, opts);
   std::string output = folly::parseJson(jsonInput).asString();
   std::string jsonOutput = folly::json::serialize(output, opts);
@@ -623,19 +676,20 @@ TEST(Json, UTF8Validation) {
   opts.skip_invalid_utf8 = true;
   EXPECT_EQ(
       folly::json::serialize("a\xe0\xa0\x80z\xc0\x80", opts),
-      u8"\"a\xe0\xa0\x80z\ufffd\ufffd\"");
+      reinterpret_cast<const char*>(u8"\"a\xe0\xa0\x80z\ufffd\ufffd\""));
   EXPECT_EQ(
       folly::json::serialize("a\xe0\xa0\x80z\xc0\x80\x80", opts),
-      u8"\"a\xe0\xa0\x80z\ufffd\ufffd\ufffd\"");
+      reinterpret_cast<const char*>(u8"\"a\xe0\xa0\x80z\ufffd\ufffd\ufffd\""));
   EXPECT_EQ(
       folly::json::serialize("z\xc0\x80z\xe0\xa0\x80", opts),
-      u8"\"z\ufffd\ufffdz\xe0\xa0\x80\"");
+      reinterpret_cast<const char*>(u8"\"z\ufffd\ufffdz\xe0\xa0\x80\""));
   EXPECT_EQ(
       folly::json::serialize("\xF6\x8D\x9B\xBC", opts),
-      u8"\"\ufffd\ufffd\ufffd\ufffd\"");
+      reinterpret_cast<const char*>(u8"\"\ufffd\ufffd\ufffd\ufffd\""));
   EXPECT_EQ(
       folly::json::serialize("invalid\xF6\x8D\x9B\xBCinbetween", opts),
-      u8"\"invalid\ufffd\ufffd\ufffd\ufffdinbetween\"");
+      reinterpret_cast<const char*>(
+          u8"\"invalid\ufffd\ufffd\ufffd\ufffdinbetween\""));
 
   opts.encode_non_ascii = true;
   EXPECT_EQ(
@@ -689,7 +743,7 @@ TEST(Json, ParseDoubleFallback) {
   EXPECT_EQ(
       std::numeric_limits<int64_t>::max(),
       parseJson("{\"a\":9223372036854775807}").items().begin()->second.asInt());
-  // with double_fallback
+  // with double_fallback numbers outside int64_t range are parsed as double
   folly::json::serialization_opts opts;
   opts.double_fallback = true;
   EXPECT_EQ(
@@ -716,6 +770,38 @@ TEST(Json, ParseDoubleFallback) {
           .items()
           .begin()
           ->second.asDouble());
+  // show that some precision gets lost
+  EXPECT_EQ(
+      847605071342477612345678900000.0,
+      parseJson("{\"a\":847605071342477612345678912345}", opts)
+          .items()
+          .begin()
+          ->second.asDouble());
+  EXPECT_DOUBLE_EQ(
+      -9223372036854775809.0,
+      parseJson("{\"a\":-9223372036854775809}", opts) // first smaller than min
+          .items()
+          .begin()
+          ->second.asDouble());
+  EXPECT_DOUBLE_EQ(
+      9223372036854775808.0,
+      parseJson("{\"a\":9223372036854775808}", opts) // first larger than max
+          .items()
+          .begin()
+          ->second.asDouble());
+  EXPECT_DOUBLE_EQ(
+      -10000000000000000000.0,
+      parseJson("{\"a\":-10000000000000000000}", opts) // minus + 20 digits
+          .items()
+          .begin()
+          ->second.asDouble());
+  EXPECT_DOUBLE_EQ(
+      10000000000000000000.0,
+      parseJson("{\"a\":10000000000000000000}", opts) // 20 digits
+          .items()
+          .begin()
+          ->second.asDouble());
+  // numbers within int64_t range are deserialized as int64_t, no loss
   EXPECT_EQ(
       std::numeric_limits<int64_t>::min(),
       parseJson("{\"a\":-9223372036854775808}", opts)
@@ -728,16 +814,48 @@ TEST(Json, ParseDoubleFallback) {
           .items()
           .begin()
           ->second.asInt());
-  // show that some precision gets lost
   EXPECT_EQ(
-      847605071342477612345678900000.0,
-      parseJson("{\"a\":847605071342477612345678912345}", opts)
+      INT64_C(-1234567890123456789),
+      parseJson("{\"a\":-1234567890123456789}", opts) // minus + 19 digits
           .items()
           .begin()
-          ->second.asDouble());
+          ->second.asInt());
+  EXPECT_EQ(
+      INT64_C(1234567890123456789),
+      parseJson("{\"a\":1234567890123456789}", opts) // 19 digits
+          .items()
+          .begin()
+          ->second.asInt());
+  EXPECT_EQ(
+      INT64_C(-123456789012345678),
+      parseJson("{\"a\":-123456789012345678}", opts) // minus + 18 digits
+          .items()
+          .begin()
+          ->second.asInt());
+  EXPECT_EQ(
+      INT64_C(123456789012345678),
+      parseJson("{\"a\":123456789012345678}", opts) // 18 digits
+          .items()
+          .begin()
+          ->second.asInt());
   EXPECT_EQ(
       toJson(parseJson(R"({"a":-9223372036854775808})", opts)),
       R"({"a":-9223372036854775808})");
+  EXPECT_EQ(
+      toJson(parseJson(R"({"a":9223372036854775807})", opts)),
+      R"({"a":9223372036854775807})");
+  EXPECT_EQ(
+      toJson(parseJson(R"({"a":-1234567890123456789})", opts)),
+      R"({"a":-1234567890123456789})");
+  EXPECT_EQ(
+      toJson(parseJson(R"({"a":1234567890123456789})", opts)),
+      R"({"a":1234567890123456789})");
+  EXPECT_EQ(
+      toJson(parseJson(R"({"a":-123456789012345678})", opts)),
+      R"({"a":-123456789012345678})");
+  EXPECT_EQ(
+      toJson(parseJson(R"({"a":123456789012345678})", opts)),
+      R"({"a":123456789012345678})");
 }
 
 TEST(Json, ParseNumbersAsStrings) {
@@ -910,10 +1028,10 @@ TEST(Json, PrintTo) {
       R"({
   false: true,
   true: false,
-  0.5: 0.25,
-  1.5: 2.25,
   0: 1,
+  0.5: 0.25,
   1: 2,
+  1.5: 2.25,
   2: 3,
   "a": [
     {

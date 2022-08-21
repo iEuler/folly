@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,11 +38,15 @@ using namespace folly::test;
 using namespace std;
 using namespace std::chrono;
 
-typedef DeterministicSchedule DSched;
-typedef SharedMutexImpl<true, void, DeterministicAtomic, true>
-    DSharedMutexReadPriority;
-typedef SharedMutexImpl<false, void, DeterministicAtomic, true>
-    DSharedMutexWritePriority;
+struct DSharedMutexPolicy : SharedMutexPolicyDefault {
+  static constexpr uint32_t max_spin_count = 0;
+  static constexpr uint32_t max_soft_yield_count = 0;
+};
+using DSched = DeterministicSchedule;
+using DSharedMutexReadPriority =
+    SharedMutexImpl<true, void, DeterministicAtomic, DSharedMutexPolicy>;
+using DSharedMutexWritePriority =
+    SharedMutexImpl<false, void, DeterministicAtomic, DSharedMutexPolicy>;
 
 template <typename Lock>
 void runBasicTest() {
@@ -652,7 +656,7 @@ static void runMixed(
         std::minstd_rand engine;
         engine.seed(t);
 
-        long writeThreshold = writeFraction * 0x7fffffff;
+        long writeThreshold = to_integral(writeFraction * 0x7fffffff);
         Lock privateLock;
         Lock* lock = useSeparateLocks ? &privateLock : &(padded.globalLock);
         Locker locker;

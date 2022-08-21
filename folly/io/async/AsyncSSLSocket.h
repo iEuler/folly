@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -166,7 +166,7 @@ class AsyncSSLSocket : public AsyncSocket {
           sslSocket_(sslSocket),
           dg_(std::move(dg)) {}
 
-    ~DefaultOpenSSLAsyncFinishCallback() {
+    ~DefaultOpenSSLAsyncFinishCallback() override {
       pipeReader_->setReadCB(nullptr);
       sslSocket_->setAsyncOperationFinishCallback(nullptr);
     }
@@ -379,9 +379,12 @@ class AsyncSSLSocket : public AsyncSocket {
   void closeNow() override;
   void shutdownWrite() override;
   void shutdownWriteNow() override;
+  bool readable() const override;
   bool good() const override;
   bool connecting() const override;
   std::string getApplicationProtocol() const noexcept override;
+  void setSupportedApplicationProtocols(
+      const std::vector<std::string>& supportedProtocols);
 
   std::string getSecurityProtocol() const override {
     if (sslState_ == STATE_UNENCRYPTED) {
@@ -389,6 +392,11 @@ class AsyncSSLSocket : public AsyncSocket {
     }
     return "TLS";
   }
+
+  std::unique_ptr<folly::IOBuf> getExportedKeyingMaterial(
+      folly::StringPiece label,
+      std::unique_ptr<IOBuf> context,
+      uint16_t length) const override;
 
   void setEorTracking(bool track) override;
   size_t getRawBytesWritten() const override;
@@ -767,6 +775,13 @@ class AsyncSSLSocket : public AsyncSocket {
   void getSSLServerCiphers(std::string& serverCiphers) const;
 
   /**
+   * Get the list of next protocols sent from the client. The protocols are
+   * directly as the client passed them and may be arbitrary byte sequences
+   * of arbitrary length.
+   */
+  const std::vector<std::string>& getClientAlpns() const;
+
+  /**
    * Method to check if peer verfication is set.
    *
    * @return true if peer verification is required.
@@ -778,6 +793,10 @@ class AsyncSSLSocket : public AsyncSocket {
   static int bioWrite(BIO* b, const char* in, int inl);
   static int bioRead(BIO* b, char* out, int outl);
   void resetClientHelloParsing(SSL* ssl);
+  static void parseClientAlpns(
+      AsyncSSLSocket* sock,
+      folly::io::Cursor& cursor,
+      uint16_t& extensionDataLength);
   static void clientHelloParsingCallback(
       int written,
       int version,
@@ -854,6 +873,8 @@ class AsyncSSLSocket : public AsyncSocket {
     return false;
   }
 
+  const char* getNegotiatedGroup() const;
+
  private:
   /**
    * Handle the return from invoking SSL_accept
@@ -892,6 +913,7 @@ class AsyncSSLSocket : public AsyncSocket {
 
   WriteResult interpretSSLError(int rc, int error);
   ReadResult performRead(void** buf, size_t* buflen, size_t* offset) override;
+  ReadResult performReadv(struct iovec* iovs, size_t num) override;
   WriteResult performWrite(
       const iovec* vec,
       uint32_t count,
@@ -1004,6 +1026,8 @@ class AsyncSSLSocket : public AsyncSocket {
   std::chrono::milliseconds totalConnectTimeout_{0};
 
   std::string sslVerificationAlert_;
+
+  std::string encodedAlpn_;
 
   bool sessionResumptionAttempted_{false};
   // whether the SSL session was resumed using session ID or not

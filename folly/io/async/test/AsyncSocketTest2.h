@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -182,7 +182,8 @@ class TestAcceptCallback : public AsyncServerSocket::AcceptCallback {
 
   void connectionAccepted(
       NetworkSocket fd,
-      const folly::SocketAddress& clientAddr) noexcept override {
+      const folly::SocketAddress& clientAddr,
+      AcceptInfo /* info */) noexcept override {
     events_.emplace_back(fd, clientAddr);
 
     if (connectionAcceptedFn_) {

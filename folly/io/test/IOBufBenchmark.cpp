@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -74,6 +74,22 @@ BENCHMARK(copyBenchmark, iters) {
   while (iters--) {
     auto copy = buf;
     folly::doNotOptimizeAway(copy.capacity());
+  }
+}
+
+BENCHMARK(copyBufferFromStringBenchmark, iters) {
+  std::string s("Hello World");
+  while (iters--) {
+    auto copy = IOBuf::copyBuffer(s);
+    folly::doNotOptimizeAway(copy->capacity());
+  }
+}
+
+BENCHMARK(copyBufferFromStringPieceBenchmark, iters) {
+  folly::StringPiece s("Hello World");
+  while (iters--) {
+    auto copy = IOBuf::copyBuffer(s);
+    folly::doNotOptimizeAway(copy->capacity());
   }
 }
 

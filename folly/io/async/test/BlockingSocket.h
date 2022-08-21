@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,6 +73,17 @@ class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
     return folly::to_narrow(folly::to_signed(len));
   }
 
+  void writev(
+      const iovec* vec,
+      size_t count,
+      folly::WriteFlags flags = folly::WriteFlags::NONE) {
+    sock_->writev(this, vec, count, flags);
+    eventBase_.loop();
+    if (err_.has_value()) {
+      throw err_.value();
+    }
+  }
+
   void flush() {}
 
   int32_t readAll(uint8_t* buf, size_t len) {
@@ -80,6 +91,10 @@ class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
   }
 
   int32_t read(uint8_t* buf, size_t len) { return readHelper(buf, len, false); }
+
+  int32_t readNoBlock(uint8_t* buf, size_t len) {
+    return readHelper(buf, len, false, EVLOOP_NONBLOCK);
+  }
 
   folly::NetworkSocket getNetworkSocket() const {
     return sock_->getNetworkSocket();
@@ -110,8 +125,19 @@ class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
   void readDataAvailable(size_t len) noexcept override {
     readBuf_ += len;
     readLen_ -= len;
+
     if (readLen_ == 0) {
       sock_->setReadCB(nullptr);
+    }
+  }
+  void getReadBuffers(folly::IOBufIovecBuilder::IoVecVec& iovs) override {
+    // we reuse the same readBuf_
+    iovs.clear();
+    for (size_t i = 0; i < readLen_; i++) {
+      struct iovec iov;
+      iov.iov_base = &readBuf_[i];
+      iov.iov_len = 1;
+      iovs.push_back(iov);
     }
   }
   void readEOF() noexcept override {}
@@ -125,16 +151,15 @@ class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
     err_ = ex;
   }
 
-  int32_t readHelper(uint8_t* buf, size_t len, bool all) {
+  int32_t readHelper(uint8_t* buf, size_t len, bool all, int flags = 0) {
     if (!sock_->good()) {
       return 0;
     }
-
     readBuf_ = buf;
     readLen_ = len;
     sock_->setReadCB(this);
     while (!err_ && sock_->good() && readLen_ > 0) {
-      eventBase_.loopOnce();
+      eventBase_.loopOnce(flags);
       if (!all) {
         break;
       }

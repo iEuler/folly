@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ static constexpr ssize_t kDefaultMlockChunkSize = !folly::kMscVer
     // with the same address is a bad idea with the windows implementation.
     : (-1);
 
-DEFINE_int64(
+FOLLY_GFLAGS_DEFINE_int64(
     mlock_chunk_size,
     kDefaultMlockChunkSize,
     "Maximum bytes to mlock/munlock/munmap at once "
@@ -268,6 +268,7 @@ int mlock2wrapper(
     FOLLY_MAYBE_UNUSED size_t len,
     MemoryMapping::LockFlags flags) {
   int intFlags = 0;
+  (void)intFlags;
   if (flags.lockOnFault) {
     // MLOCK_ONFAULT, only available in non-portable headers.
     intFlags |= 0x01;

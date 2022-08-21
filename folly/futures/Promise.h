@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -239,7 +239,7 @@ class Promise {
   ///   Promise<MyValue> p = ...
   ///   ...
   ///   auto const ep = std::exception_ptr();
-  ///   auto const ew = exception_wrapper::from_exception_ptr(ep);
+  ///   auto const ew = exception_wrapper{ep};
   ///   p.setException(ew);
   ///
   /// Functionally equivalent to `setTry(Try<T>(std::move(ew)))`

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,7 +69,7 @@ class CallbackHolder {
 namespace folly {
 namespace exception_tracer {
 
-#define DECLARE_CALLBACK(NAME)                                   \
+#define FOLLY_EXNTRACE_DECLARE_CALLBACK(NAME)                    \
   CallbackHolder<NAME##Type>& get##NAME##Callbacks() {           \
     static Indestructible<CallbackHolder<NAME##Type>> Callbacks; \
     return *Callbacks;                                           \
@@ -78,11 +78,13 @@ namespace exception_tracer {
     get##NAME##Callbacks().registerCallback(callback);           \
   }
 
-DECLARE_CALLBACK(CxaThrow)
-DECLARE_CALLBACK(CxaBeginCatch)
-DECLARE_CALLBACK(CxaRethrow)
-DECLARE_CALLBACK(CxaEndCatch)
-DECLARE_CALLBACK(RethrowException)
+FOLLY_EXNTRACE_DECLARE_CALLBACK(CxaThrow)
+FOLLY_EXNTRACE_DECLARE_CALLBACK(CxaBeginCatch)
+FOLLY_EXNTRACE_DECLARE_CALLBACK(CxaRethrow)
+FOLLY_EXNTRACE_DECLARE_CALLBACK(CxaEndCatch)
+FOLLY_EXNTRACE_DECLARE_CALLBACK(RethrowException)
+
+#undef FOLLY_EXNTRACE_DECLARE_CALLBACK
 
 } // namespace exception_tracer
 } // namespace folly

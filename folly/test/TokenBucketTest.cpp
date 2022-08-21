@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,20 @@ TEST(TokenBucket, ReverseTime) {
   double tokensBefore = tokenBucket.available();
   EXPECT_FALSE(tokenBucket.consume(1, 0.09999999));
   EXPECT_EQ(tokensBefore, tokenBucket.available());
+}
+
+TEST(TokenBucketTest, CtorAssign) {
+  BasicDynamicTokenBucket bucketA(100.0);
+  EXPECT_EQ(0, bucketA.available(10, 10, 90));
+
+  BasicDynamicTokenBucket bucketB(bucketA);
+  EXPECT_EQ(0, bucketB.available(10, 10, 90));
+
+  bucketA.reset(0.0);
+  EXPECT_EQ(10, bucketA.available(10, 10, 90));
+
+  bucketB = bucketA;
+  EXPECT_EQ(10, bucketB.available(10, 10, 90));
 }
 
 TEST_P(TokenBucketTest, sanity) {

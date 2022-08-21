@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -168,7 +168,7 @@ class basic_once_flag {
 
 class compact_once_flag {
  public:
-  compact_once_flag() noexcept { mutex_.init(); }
+  compact_once_flag() = default;
   compact_once_flag(const compact_once_flag&) = delete;
   compact_once_flag& operator=(const compact_once_flag&) = delete;
 

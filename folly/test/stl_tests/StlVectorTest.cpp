@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -184,6 +184,7 @@ THOUGHTS:
 #include <folly/Conv.h>
 #include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
+#include <folly/chrono/Hardware.h>
 #include <folly/lang/Pretty.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
@@ -647,11 +648,15 @@ map<void*, int> AllocTracker::Owner;
 
 template <class T>
 struct Alloc : AllocTracker, Ticker {
-  typedef typename std::allocator<T>::pointer pointer;
-  typedef typename std::allocator<T>::const_pointer const_pointer;
-  typedef typename std::allocator<T>::difference_type difference_type;
-  typedef typename std::allocator<T>::size_type size_type;
-  typedef typename std::allocator<T>::value_type value_type;
+  typedef typename std::allocator_traits<std::allocator<T>>::pointer pointer;
+  typedef typename std::allocator_traits<std::allocator<T>>::const_pointer
+      const_pointer;
+  typedef typename std::allocator_traits<std::allocator<T>>::difference_type
+      difference_type;
+  typedef
+      typename std::allocator_traits<std::allocator<T>>::size_type size_type;
+  typedef
+      typename std::allocator_traits<std::allocator<T>>::value_type value_type;
 
   //-----
   // impl
@@ -710,14 +715,15 @@ struct Alloc : AllocTracker, Ticker {
   template <class U, class... Args>
   void construct(U* p, Args&&... args) {
     Tick("construct");
-    a.construct(p, std::forward<Args>(args)...);
+    std::allocator_traits<std::allocator<T>>::construct(
+        a, p, std::forward<Args>(args)...);
     Constructed++;
   }
 
   template <class U>
   void destroy(U* p) {
     Destroyed++;
-    a.destroy(p);
+    std::allocator_traits<std::allocator<T>>::destroy(a, p);
   }
 
   //--------------
@@ -831,19 +837,7 @@ struct special_move_assignable<Data<f, pad>>
 // Timing
 
 uint64_t ReadTSC() {
-#ifdef _MSC_VER
-  return __rdtsc();
-#else
-  unsigned reslo, reshi;
-
-  __asm__ __volatile__("xorl %%eax,%%eax \n cpuid \n" ::
-                           : "%eax", "%ebx", "%ecx", "%edx");
-  __asm__ __volatile__("rdtsc\n" : "=a"(reslo), "=d"(reshi));
-  __asm__ __volatile__("xorl %%eax,%%eax \n cpuid \n" ::
-                           : "%eax", "%ebx", "%ecx", "%edx");
-
-  return ((uint64_t)reshi << 32) | reslo;
-#endif
+  return hardware_timestamp();
 }
 
 //-----------------------------------------------------------------------------

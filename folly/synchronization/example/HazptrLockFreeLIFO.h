@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ class HazptrLockFreeLIFO {
     hazptr_holder<Atom>& hptr = h[0];
     Node* node;
     while (true) {
-      node = hptr.get_protected(head_);
+      node = hptr.protect(head_);
       if (node == nullptr) {
         return false;
       }
@@ -59,7 +59,7 @@ class HazptrLockFreeLIFO {
         break;
       }
     }
-    hptr.reset();
+    hptr.reset_protection();
     val = node->value();
     node->retire();
     return true;

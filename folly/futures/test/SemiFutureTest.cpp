@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -204,7 +204,7 @@ TEST(SemiFuture, hasPostconditionValid) {
   DOIT(f.raise(std::logic_error("foo")));
   DOIT(f.cancel());
   DOIT(f.wait());
-  DOIT(std::move(f.wait()));
+  DOIT(std::move(f).wait());
 
 #undef DOIT
 }
@@ -727,13 +727,13 @@ TEST(SemiFuture, onError) {
   do {                    \
     EXPECT_TRUE(theFlag); \
     theFlag = false;      \
-  } while (0);
+  } while (0)
 
 #define EXPECT_NO_FLAG()   \
   do {                     \
     EXPECT_FALSE(theFlag); \
     theFlag = false;       \
-  } while (0);
+  } while (0)
 
   // By reference
   {
@@ -1222,9 +1222,8 @@ TEST(SemiFuture, ensure) {
     EXPECT_FALSE(fCalled);
     EXPECT_FALSE(ensureCalled);
   }
+  struct ExpectedException : public std::exception {};
   {
-    struct ExpectedException {};
-
     bool fCalled{false};
     bool ensureCalled{false};
     auto sf = futures::ensure(
@@ -1235,6 +1234,31 @@ TEST(SemiFuture, ensure) {
         [&] { ensureCalled = true; });
     EXPECT_THROW(std::move(sf).get(), ExpectedException);
     EXPECT_TRUE(fCalled);
+    EXPECT_TRUE(ensureCalled);
+  }
+  {
+    bool ensureCalled{false};
+    auto sf = makeSemiFuture(42).deferEnsure([&] { ensureCalled = true; });
+    EXPECT_FALSE(ensureCalled);
+    EXPECT_EQ(42, std::move(sf).get());
+    EXPECT_TRUE(ensureCalled);
+  }
+  {
+    bool ensureCalled{false};
+    auto sf = makeSemiFuture().defer([](auto) { return 42; }).deferEnsure([&] {
+      ensureCalled = true;
+    });
+    EXPECT_FALSE(ensureCalled);
+    EXPECT_EQ(42, std::move(sf).get());
+    EXPECT_TRUE(ensureCalled);
+  }
+  {
+    bool ensureCalled{false};
+    auto sf = makeSemiFuture()
+                  .defer([](auto) { throw ExpectedException(); })
+                  .deferEnsure([&] { ensureCalled = true; });
+    EXPECT_FALSE(ensureCalled);
+    EXPECT_THROW(std::move(sf).get(), ExpectedException);
     EXPECT_TRUE(ensureCalled);
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ class ManualExecutor : public DrivableExecutor,
                        public ScheduledExecutor,
                        public SequencedExecutor {
  public:
-  ~ManualExecutor();
+  ~ManualExecutor() override;
 
   void add(Func) override;
 
@@ -50,6 +50,12 @@ class ManualExecutor : public DrivableExecutor,
   /// This also means, there may be more work available to perform at the
   /// moment that this returns.
   size_t run();
+
+  /// Execute only the function at the front of the queue (maybe 0)
+  /// and remove it from the queue.
+  /// Non blocking where it does not wait for work if none exists
+  /// Returns 1 if a function was executed and 0 otherwise
+  size_t step();
 
   // Do work until there is no more work to do.
   // Returns the number of functions that were executed (maybe 0).

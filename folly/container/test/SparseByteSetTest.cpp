@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,5 +64,16 @@ TEST_F(SparseByteSetTest, each_random) {
     added.insert(c);
     EXPECT_TRUE(added.count(c)); // sanity
     EXPECT_TRUE(s.contains(c));
+  }
+}
+
+TEST_F(SparseByteSetTest, clear) {
+  for (auto c = lims::min(); c < lims::max(); ++c) {
+    EXPECT_TRUE(s.add(c));
+  }
+  s.clear();
+  for (auto c = lims::max() - 1; c > lims::min(); --c) {
+    EXPECT_FALSE(s.contains(c));
+    EXPECT_TRUE(s.add(c));
   }
 }

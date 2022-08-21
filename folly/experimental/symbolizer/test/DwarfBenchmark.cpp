@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ using namespace folly::symbolizer::test;
 FOLLY_NOINLINE void lexicalBlockBar() try {
   size_t unused = 0;
   unused++;
-  inlineB_inlineA_qsort();
+  inlineB_inlineA_lfind();
 } catch (...) {
   folly::assume_unreachable();
 }
@@ -45,11 +45,12 @@ void run(LocationInfoMode mode, size_t n) {
   gComparatorGetStackTrace = (bool (*)(void*))getStackTrace<100>;
   lexicalBlockBar();
   symbolizer.symbolize(frames);
-  // The address of the line where lexicalBlockBar calls inlineB_inlineA_qsort.
+  // The address of the line where lexicalBlockBar calls inlineB_inlineA_lfind.
   uintptr_t address = frames.frames[7].addr;
 
+  ElfCache cache;
   ElfFile elf("/proc/self/exe");
-  Dwarf dwarf(&elf);
+  Dwarf dwarf(&cache, &elf);
   auto inlineFrames = std::array<SymbolizedFrame, 10>();
   suspender.dismiss();
 
@@ -57,6 +58,8 @@ void run(LocationInfoMode mode, size_t n) {
     LocationInfo info;
     dwarf.findAddress(address, mode, info, folly::range(inlineFrames));
   }
+
+  suspender.rehire();
 }
 
 } // namespace

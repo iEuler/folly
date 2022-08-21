@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,10 @@
 
 #include <folly/portability/GFlags.h>
 
-DEFINE_int32(codel_interval, 100, "Codel default interval time in ms");
-DEFINE_int32(codel_target_delay, 5, "Target codel queueing delay in ms");
+FOLLY_GFLAGS_DEFINE_int32(
+    codel_interval, 100, "Codel default interval time in ms");
+FOLLY_GFLAGS_DEFINE_int32(
+    codel_target_delay, 5, "Target codel queueing delay in ms");
 
 using namespace std::chrono;
 

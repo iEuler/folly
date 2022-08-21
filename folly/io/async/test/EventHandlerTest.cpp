@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ class EventHandlerMock : public EventHandler {
   EventHandlerMock(EventBase* eb, int fd)
       : EventHandler(eb, NetworkSocket::fromFd(fd)) {}
   // gmock can't mock noexcept methods, so we need an intermediary
-  MOCK_METHOD1(_handlerReady, void(uint16_t));
+  MOCK_METHOD(void, _handlerReady, (uint16_t));
   void handlerReady(uint16_t events) noexcept override {
     _handlerReady(events);
   }

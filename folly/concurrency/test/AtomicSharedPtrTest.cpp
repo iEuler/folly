@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@
 
 // AtomicSharedPtr-detail.h only works with libstdc++, so skip these tests for
 // other vendors
-#ifdef FOLLY_USE_LIBSTDCPP
+// PackedSyncPtr requires x64, ppc64 or aarch64, skip these tests for
+// other arches
+#if defined(__GLIBCXX__) && (FOLLY_X64 || FOLLY_PPC64 || FOLLY_AARCH64)
 
 #include <folly/concurrency/test/AtomicSharedPtrCounted.h>
 
@@ -187,4 +189,4 @@ TEST(AtomicSharedPtr, DeterministicTest) {
     DSched::join(t);
   }
 }
-#endif // #ifdef FOLLY_USE_LIBSTDCPP
+#endif // defined(__GLIBCXX__)

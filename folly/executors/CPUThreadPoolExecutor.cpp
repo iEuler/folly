@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,13 @@
 #include <atomic>
 #include <folly/Memory.h>
 #include <folly/Optional.h>
-#include <folly/concurrency/QueueObserver.h>
+#include <folly/executors/QueueObserver.h>
 #include <folly/executors/task_queue/PriorityLifoSemMPMCQueue.h>
 #include <folly/executors/task_queue/PriorityUnboundedBlockingQueue.h>
 #include <folly/executors/task_queue/UnboundedBlockingQueue.h>
 #include <folly/portability/GFlags.h>
 
-DEFINE_bool(
+FOLLY_GFLAGS_DEFINE_bool(
     dynamic_cputhreadpoolexecutor,
     true,
     "CPUThreadPoolExecutor will dynamically create and destroy threads");
@@ -272,8 +272,16 @@ void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
   }
 
   thread->startupBaton.post();
+  threadIdCollector_->addTid(folly::getOSThreadID());
+  // On thread exit, we should remove the thread ID from the tracking list.
+  auto threadIDsGuard = folly::makeGuard([this]() {
+    // The observer could be capturing a stack trace from this thread
+    // so it should block until the collection finishes to exit.
+    threadIdCollector_->removeTid(folly::getOSThreadID());
+  });
   while (true) {
-    auto task = taskQueue_->try_take_for(threadTimeout_);
+    auto task = taskQueue_->try_take_for(
+        threadTimeout_.load(std::memory_order_relaxed));
 
     // Handle thread stopping, either by task timeout, or
     // by 'poison' task added in join() or stop().
@@ -326,7 +334,9 @@ CPUThreadPoolExecutor::createQueueObserverFactory() {
     observer.store(nullptr, std::memory_order_release);
   }
   return QueueObserverFactory::make(
-      "cpu." + getName(), taskQueue_->getNumPriorities());
+      "cpu." + getName(),
+      taskQueue_->getNumPriorities(),
+      threadIdCollector_.get());
 }
 
 } // namespace folly

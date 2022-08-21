@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,10 +33,13 @@
 #include <folly/io/async/AsyncSSLSocket.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventBaseThread.h>
+#include <folly/io/async/SSLOptions.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
+#include <folly/io/async/ssl/BasicTransportCertificate.h>
 #include <folly/io/async/ssl/OpenSSLTransportCertificate.h>
 #include <folly/io/async/test/BlockingSocket.h>
 #include <folly/io/async/test/MockAsyncTransportObserver.h>
+#include <folly/io/async/test/TFOTest.h>
 #include <folly/net/NetOps.h>
 #include <folly/net/NetworkSocket.h>
 #include <folly/net/test/MockNetOpsDispatcher.h>
@@ -162,11 +165,76 @@ std::string getFileAsBuf(const char* fileName) {
   return buffer;
 }
 
+folly::ssl::X509UniquePtr readCertFromFile(const std::string& filename) {
+  folly::ssl::BioUniquePtr bio(BIO_new(BIO_s_file()));
+  if (!bio) {
+    throw std::runtime_error("Couldn't create BIO");
+  }
+
+  if (BIO_read_filename(bio.get(), filename.c_str()) != 1) {
+    throw std::runtime_error("Couldn't read cert file: " + filename);
+  }
+  return folly::ssl::X509UniquePtr(
+      PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
+}
+
+namespace {
+void connectWriteReadClose(
+    folly::AsyncReader::ReadCallback::ReadMode readMode) {
+  // Start listening on a local port
+  WriteCallbackBase writeCallback;
+  ReadCallback readCallback(&writeCallback);
+  HandshakeCallback handshakeCallback(&readCallback);
+  SSLServerAcceptCallback acceptCallback(&handshakeCallback);
+  TestSSLServer server(&acceptCallback);
+
+  // Set up SSL context.
+  std::shared_ptr<SSLContext> sslContext(new SSLContext());
+  sslContext->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
+  // sslContext->loadTrustedCertificates("./trusted-ca-certificate.pem");
+  // sslContext->authenticate(true, false);
+
+  // connect
+  auto socket =
+      std::make_shared<BlockingSocket>(server.getAddress(), sslContext);
+  socket->setReadMode(readMode);
+  socket->open(std::chrono::milliseconds(10000));
+
+  // write()
+  uint8_t buf[128];
+  memset(buf, 'a', sizeof(buf));
+  socket->write(buf, sizeof(buf));
+
+  // read()
+  uint8_t readbuf[128];
+  uint32_t bytesRead = socket->readAll(readbuf, sizeof(readbuf));
+  EXPECT_EQ(bytesRead, 128);
+  EXPECT_EQ(memcmp(buf, readbuf, bytesRead), 0);
+
+  // close()
+  socket->close();
+
+  cerr << "ConnectWriteReadClose test completed" << endl;
+  EXPECT_EQ(socket->getSSLSocket()->getTotalConnectTimeout().count(), 10000);
+}
+} // namespace
+
 /**
  * Test connecting to, writing to, reading from, and closing the
  * connection to the SSL server.
  */
 TEST(AsyncSSLSocketTest, ConnectWriteReadClose) {
+  connectWriteReadClose(folly::AsyncReader::ReadCallback::ReadMode::ReadBuffer);
+}
+
+TEST(AsyncSSLSocketTest, ConnectWriteReadvClose) {
+  connectWriteReadClose(folly::AsyncReader::ReadCallback::ReadMode::ReadVec);
+  ;
+}
+
+TEST(AsyncSSLSocketTest, ConnectWriteReadCloseReadable) {
+  // Same as above, but test AsyncSSLSocket::readable along the way
+
   // Start listening on a local port
   WriteCallbackBase writeCallback;
   ReadCallback readCallback(&writeCallback);
@@ -192,7 +260,16 @@ TEST(AsyncSSLSocketTest, ConnectWriteReadClose) {
 
   // read()
   uint8_t readbuf[128];
-  uint32_t bytesRead = socket->readAll(readbuf, sizeof(readbuf));
+  // The TLS record includes the full 128 bytes.  Even though we only read 1
+  // byte out of the socket, the rest of the full record decrypted and buffered
+  // in the underlying SSL session.
+  uint32_t bytesRead = socket->read(readbuf, 1);
+  EXPECT_EQ(bytesRead, 1);
+  // The socket has no data pending in the kernel
+  EXPECT_FALSE(socket->getSocket()->AsyncSocket::readable());
+  // But the socket is readable
+  EXPECT_TRUE(socket->getSocket()->readable());
+  bytesRead += socket->readAll(readbuf + 1, sizeof(readbuf) - 1);
   EXPECT_EQ(bytesRead, 128);
   EXPECT_EQ(memcmp(buf, readbuf, bytesRead), 0);
 
@@ -586,6 +663,42 @@ TEST_F(NextProtocolTest, RandomizedAlpnTest) {
   }
   EXPECT_EQ(selectedProtocols.size(), 2);
 }
+
+TEST_F(NextProtocolTest, AlpnNotAllowMismatchNoClientProtocol) {
+  clientCtx->setAdvertisedNextProtocols({});
+  serverCtx->setAdvertisedNextProtocols({"foo", "bar", "baz"});
+  serverCtx->setAlpnAllowMismatch(false);
+
+  connect();
+
+  expectHandshakeSuccess();
+  expectNoProtocol();
+  EXPECT_EQ(server->getClientAlpns(), std::vector<std::string>({}));
+}
+
+TEST_F(NextProtocolTest, AlpnNotAllowMismatchWithOverlap) {
+  clientCtx->setAdvertisedNextProtocols({"blub", "baz"});
+  serverCtx->setAdvertisedNextProtocols({"foo", "bar", "baz"});
+  serverCtx->setAlpnAllowMismatch(false);
+
+  connect();
+
+  expectProtocol("baz");
+  EXPECT_EQ(
+      server->getClientAlpns(), std::vector<std::string>({"blub", "baz"}));
+}
+
+TEST_F(NextProtocolTest, AlpnNotAllowMismatchWithoutOverlap) {
+  clientCtx->setAdvertisedNextProtocols({"blub"});
+  serverCtx->setAdvertisedNextProtocols({"foo", "bar", "baz"});
+  serverCtx->setAlpnAllowMismatch(false);
+
+  connect();
+
+  expectHandshakeError();
+  EXPECT_EQ(server->getClientAlpns(), std::vector<std::string>({"blub"}));
+}
+
 #endif
 
 #ifndef OPENSSL_NO_TLSEXT
@@ -723,6 +836,49 @@ TEST(AsyncSSLSocketTest, SNITestClientHelloNoHostname) {
 
   EXPECT_TRUE(!client.serverNameMatch);
   EXPECT_TRUE(!server.serverNameMatch);
+}
+
+/**
+ * 1. Create an SSLContext that does not have an ALPN
+ * 2. Use AsyncSSLSocket::setSupportedApplicationProtocols on the client and
+ * server, and assert that a common ALPN was negotiated.
+ */
+TEST(AsyncSSLSocketTest, SetSupportedApplicationProtocols) {
+  EventBase eventBase;
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto dfServerCtx = std::make_shared<SSLContext>();
+  // Use the same SSLContext to continue the handshake after
+  // tlsext_hostname match.
+  auto hskServerCtx = std::make_shared<SSLContext>();
+  const std::string serverExpectedServerName("xyz.newdev.facebook.com");
+
+  NetworkSocket fds[2];
+  getfds(fds);
+  getctx(clientCtx, dfServerCtx);
+
+  AsyncSSLSocket::UniquePtr clientSock(
+      new AsyncSSLSocket(clientCtx, &eventBase, fds[0], false));
+  AsyncSSLSocket::UniquePtr serverSock(
+      new AsyncSSLSocket(dfServerCtx, &eventBase, fds[1], true));
+
+  std::vector<std::string> protocols;
+  protocols.push_back("rs");
+
+  clientSock->setSupportedApplicationProtocols(protocols);
+  serverSock->setSupportedApplicationProtocols(protocols);
+
+  SNIClient client(std::move(clientSock));
+  SNIServer server(
+      std::move(serverSock),
+      dfServerCtx,
+      hskServerCtx,
+      serverExpectedServerName);
+
+  eventBase.loop();
+
+  EXPECT_TRUE(
+      client.getApplicationProtocol().compare(
+          server.getApplicationProtocol()) == 0);
 }
 
 #endif
@@ -929,7 +1085,7 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloSuccess) {
   serverCtx->loadPrivateKey(kTestKey);
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
 
   clientCtx->setVerificationOption(SSLContext::SSLVerifyPeerEnum::VERIFY);
   clientCtx->ciphers("AES256-SHA:AES128-SHA");
@@ -964,6 +1120,67 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloSuccess) {
   EXPECT_TRUE(!server.handshakeError_);
 }
 
+TEST(AsyncSSLSocketTest, SSLGetEKM) {
+  EventBase eventBase;
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto serverCtx = std::make_shared<SSLContext>();
+
+  NetworkSocket fds[2];
+  getfds(fds);
+  getctx(clientCtx, serverCtx);
+
+  AsyncSSLSocket::UniquePtr clientSock(
+      new AsyncSSLSocket(clientCtx, &eventBase, fds[0], false));
+  AsyncSSLSocket::UniquePtr serverSock(
+      new AsyncSSLSocket(serverCtx, &eventBase, fds[1], true));
+
+  EXPECT_EQ(
+      nullptr, clientSock->getExportedKeyingMaterial("test", nullptr, 12));
+
+  serverSock->sslAccept(nullptr, std::chrono::milliseconds::zero());
+  clientSock->sslConn(nullptr, std::chrono::milliseconds::zero());
+  eventBase.loop();
+  auto ekm = clientSock->getExportedKeyingMaterial("test", nullptr, 32);
+
+  EXPECT_NE(nullptr, ekm);
+  EXPECT_EQ(ekm->computeChainDataLength(), 32);
+  // non null context
+  EXPECT_NE(
+      nullptr,
+      clientSock->getExportedKeyingMaterial(
+          "test", IOBuf::copyBuffer("haha"), 32));
+  // empty label
+  EXPECT_NE(
+      nullptr,
+      clientSock->getExportedKeyingMaterial("", IOBuf::copyBuffer("haha"), 32));
+
+  auto serverEkm = serverSock->getExportedKeyingMaterial("test", nullptr, 32);
+  EXPECT_TRUE(folly::IOBufEqualTo{}(ekm, serverEkm));
+}
+
+TEST(AsyncSSLSocketTest, SSLGetEKMFailsOnTLS10) {
+  EventBase eventBase;
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto serverCtx = std::make_shared<SSLContext>();
+  SSL_CTX_set_max_proto_version(serverCtx->getSSLCtx(), TLS1_VERSION);
+
+  NetworkSocket fds[2];
+  getfds(fds);
+  getctx(clientCtx, serverCtx);
+
+  AsyncSSLSocket::UniquePtr clientSock(
+      new AsyncSSLSocket(clientCtx, &eventBase, fds[0], false));
+  AsyncSSLSocket::UniquePtr serverSock(
+      new AsyncSSLSocket(serverCtx, &eventBase, fds[1], true));
+
+  serverSock->sslAccept(nullptr, std::chrono::milliseconds::zero());
+  clientSock->sslConn(nullptr, std::chrono::milliseconds::zero());
+  eventBase.loop();
+  auto ekm = clientSock->getExportedKeyingMaterial("test", nullptr, 32);
+
+  EXPECT_EQ(nullptr, ekm);
+}
+
 /**
  * Verify that server is able to get client cert by getPeerCert() API.
  */
@@ -976,7 +1193,7 @@ TEST(AsyncSSLSocketTest, GetClientCertificate) {
   serverCtx->loadPrivateKey(kTestKey);
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kClientTestCA);
-  serverCtx->loadClientCAList(kClientTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kClientTestCA);
 
   clientCtx->setVerificationOption(SSLContext::SSLVerifyPeerEnum::VERIFY);
   clientCtx->ciphers("AES256-SHA:AES128-SHA");
@@ -1013,16 +1230,12 @@ TEST(AsyncSSLSocketTest, GetClientCertificate) {
   auto clientSelfCert = cliSocket->getSelfCertificate();
   CHECK(clientSelfCert);
 
-  auto serverOpenSSLPeerCert =
-      dynamic_cast<const OpenSSLTransportCertificate*>(serverPeerCert);
-  CHECK(serverOpenSSLPeerCert);
-  auto serverX509 = serverOpenSSLPeerCert->getX509();
+  auto serverX509 =
+      folly::OpenSSLTransportCertificate::tryExtractX509(serverPeerCert);
   CHECK(serverX509);
 
-  auto clientOpenSSLSelfCert =
-      dynamic_cast<const OpenSSLTransportCertificate*>(clientSelfCert);
-  CHECK(clientOpenSSLSelfCert);
-  auto clientX509 = clientSelfCert->getX509();
+  auto clientX509 =
+      folly::OpenSSLTransportCertificate::tryExtractX509(clientSelfCert);
   CHECK(clientX509);
 
   // The two certs should be the same.
@@ -1129,6 +1342,7 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloTwoPackets) {
 TEST(AsyncSSLSocketTest, SSLParseClientHelloMultiplePackets) {
   EventBase eventBase;
   auto ctx = std::make_shared<SSLContext>();
+  ctx->setSupportedGroups(std::vector<std::string>({"P-256"}));
 
   NetworkSocket fds[2];
   getfds(fds);
@@ -1272,9 +1486,6 @@ TEST(AsyncSSLSocketTest, SSLCertificateIdentityVerifierReturns) {
   SSLServerAcceptCallback acceptCallback(&handshakeCallback);
   TestSSLServer server(&acceptCallback, serverCtx);
 
-  // return success in the Try with folly::unit
-  Try<Unit> verifyResult{unit};
-
   std::shared_ptr<MockCertificateIdentityVerifier> verifier =
       std::make_shared<MockCertificateIdentityVerifier>();
 
@@ -1282,9 +1493,11 @@ TEST(AsyncSSLSocketTest, SSLCertificateIdentityVerifierReturns) {
   // (kTestCert)
   EXPECT_CALL(
       *verifier,
-      verifyLeafImpl(Property(
+      verifyLeaf(Property(
           &AsyncTransportCertificate::getIdentity, StrEq("Asox Company"))))
-      .WillOnce(Return(ByMove(verifyResult)));
+      .WillOnce(
+          Return(ByMove(std::make_unique<folly::ssl::BasicTransportCertificate>(
+              "Asox Company", readCertFromFile(kTestCert)))));
 
   AsyncSSLSocket::Options opts;
   opts.verifier = std::move(verifier);
@@ -1303,13 +1516,6 @@ TEST(AsyncSSLSocketTest, SSLCertificateIdentityVerifierReturns) {
 
   socket->close();
 }
-
-class TestCertificateIdentityVerifierException
-    : public CertificateIdentityVerifierException {
- public:
-  explicit TestCertificateIdentityVerifierException(const char* content)
-      : CertificateIdentityVerifierException(content) {}
-};
 
 /**
  * Verify that the client fails to connect during handshake because
@@ -1337,16 +1543,15 @@ TEST(AsyncSSLSocketTest, SSLCertificateIdentityVerifierFailsToConnect) {
   std::shared_ptr<MockCertificateIdentityVerifier> verifier =
       std::make_shared<MockCertificateIdentityVerifier>();
 
-  // return a failed result Try
-  TestCertificateIdentityVerifierException failed{"a failed test reason"};
-  Try<Unit> result{failed};
+  // Throw an exception on verification failure
+  CertificateIdentityVerifierException failed{"a failed test reason"};
 
   // expecting to only verify once, with the leaf certificate (kTestCert)
   EXPECT_CALL(
       *verifier,
-      verifyLeafImpl(Property(
+      verifyLeaf(Property(
           &AsyncTransportCertificate::getIdentity, StrEq("Asox Company"))))
-      .WillOnce(Return(ByMove(result)));
+      .WillOnce(Throw(failed));
 
   AsyncSSLSocket::Options opts;
   opts.verifier = std::move(verifier);
@@ -1496,16 +1701,20 @@ TEST(AsyncSSLSocketTest, SSLCertificateIdentityVerifierSucceedsOnServer) {
       std::make_shared<MockCertificateIdentityVerifier>();
   EXPECT_CALL(
       *clientVerifier,
-      verifyLeafImpl(Property(
+      verifyLeaf(Property(
           &AsyncTransportCertificate::getIdentity, StrEq("Asox Company"))))
-      .WillOnce(Return(Try<Unit>{unit}));
+      .WillOnce(
+          Return(ByMove(std::make_unique<folly::ssl::BasicTransportCertificate>(
+              "Asox Company", readCertFromFile(kTestCert)))));
   std::shared_ptr<StrictMock<MockCertificateIdentityVerifier>> serverVerifier =
       std::make_shared<StrictMock<MockCertificateIdentityVerifier>>();
   EXPECT_CALL(
       *serverVerifier,
-      verifyLeafImpl(Property(
+      verifyLeaf(Property(
           &AsyncTransportCertificate::getIdentity, StrEq("Asox Company"))))
-      .WillOnce(Return(Try<Unit>{unit}));
+      .WillOnce(
+          Return(ByMove(std::make_unique<folly::ssl::BasicTransportCertificate>(
+              "Asox Company", readCertFromFile(kTestCert)))));
 
   AsyncSSLSocket::Options clientOpts;
   clientOpts.verifier = clientVerifier;
@@ -1583,7 +1792,7 @@ TEST(AsyncSSLSocketTest, OverrideSSLCtxEnableVerify) {
   serverCtx->loadPrivateKey(kTestKey);
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
 
   clientCtx->setVerificationOption(SSLContext::SSLVerifyPeerEnum::NO_VERIFY);
   clientCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
@@ -1700,7 +1909,7 @@ TEST(AsyncSSLSocketTest, ClientCertHandshakeSuccess) {
   serverCtx->loadPrivateKey(kTestKey);
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
 
   clientCtx->setVerificationOption(SSLContext::SSLVerifyPeerEnum::VERIFY);
   clientCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
@@ -1761,7 +1970,7 @@ TEST(AsyncSSLSocketTest, NoClientCertHandshakeError) {
   serverCtx->loadPrivateKey(kTestKey);
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
   clientCtx->setVerificationOption(SSLContext::SSLVerifyPeerEnum::NO_VERIFY);
   clientCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
 
@@ -1978,7 +2187,7 @@ TEST(AsyncSSLSocketTest, OpenSSL110AsyncTest) {
   serverCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
 
   auto rsaPointers =
       setupCustomRSA(kTestCert, kTestKey, jobEvbThread.getEventBase());
@@ -2017,7 +2226,7 @@ TEST(AsyncSSLSocketTest, OpenSSL110AsyncTestFailure) {
   serverCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
   // Set the wrong key for the cert
   auto rsaPointers =
       setupCustomRSA(kTestCert, kClientTestKey, jobEvbThread.getEventBase());
@@ -2056,7 +2265,7 @@ TEST(AsyncSSLSocketTest, OpenSSL110AsyncTestClosedWithCallbackPending) {
   serverCtx->ciphers("ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
   serverCtx->loadCertificate(kTestCert);
   serverCtx->loadTrustedCertificates(kTestCA);
-  serverCtx->loadClientCAList(kTestCA);
+  serverCtx->setSupportedClientCertificateAuthorityNamesFromFile(kTestCA);
 
   auto rsaPointers =
       setupCustomRSA(kTestCert, kTestKey, jobEvbThread->getEventBase());
@@ -2438,7 +2647,10 @@ TEST(AsyncSSLSocketTest, SSLAcceptRunnerFiber) {
 
 static int newCloseCb(SSL* ssl, SSL_SESSION*) {
   AsyncSSLSocket::getFromSSL(ssl)->closeNow();
-  return 1;
+
+  // We do not want ownership over the supplied SSL_SESSION*, we return 0 to
+  // tell OpenSSL to free it on our behalf.
+  return 0;
 }
 
 #if FOLLY_OPENSSL_IS_110
@@ -2626,8 +2838,10 @@ class MockAsyncTFOSSLSocket : public AsyncSSLSocket {
       std::shared_ptr<folly::SSLContext> sslCtx, EventBase* evb)
       : AsyncSSLSocket(sslCtx, evb) {}
 
-  MOCK_METHOD3(
-      tfoSendMsg, ssize_t(NetworkSocket fd, struct msghdr* msg, int msg_flags));
+  MOCK_METHOD(
+      ssize_t,
+      tfoSendMsg,
+      (NetworkSocket fd, struct msghdr* msg, int msg_flags));
 };
 
 #if defined __linux__
@@ -2775,6 +2989,10 @@ MockAsyncTFOSSLSocket::UniquePtr setupSocketWithFallback(
 }
 
 TEST(AsyncSSLSocketTest, ConnectWriteReadCloseTFOFallback) {
+  if (!folly::test::isTFOAvailable()) {
+    GTEST_SKIP() << "TFO not supported.";
+  }
+
   // Start listening on a local port
   WriteCallbackBase writeCallback;
   ReadCallback readCallback(&writeCallback);
@@ -2949,6 +3167,107 @@ TEST(AsyncSSLSocketTest, TestMoveFromAsyncSocket) {
   EXPECT_EQ(
       serverSSLSock->getRawBytesReceived(), clientSock->getRawBytesWritten());
 }
+
+TEST(AsyncSSLSocketTest, TestNullConnectCallbackError) {
+  EventBase eventBase;
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto serverCtx = std::make_shared<SSLContext>();
+  std::array<NetworkSocket, 2> fds;
+  getfds(fds.data());
+  getctx(clientCtx, serverCtx);
+  // Mismatched ciphers
+  clientCtx->ciphers(
+      "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256");
+  serverCtx->ciphers(
+      "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384");
+
+  AsyncSSLSocket::UniquePtr clientSockPtr(
+      new AsyncSSLSocket(clientCtx, &eventBase, fds[0], false));
+  AsyncSSLSocket::UniquePtr serverSockPtr(
+      new AsyncSSLSocket(serverCtx, &eventBase, fds[1], true));
+  auto clientSock = clientSockPtr.get();
+
+  clientSock->sslConn(nullptr);
+
+  ExpectSSLWriteErrorCallback wcb;
+  wcb.setSocket(std::move(clientSockPtr));
+  clientSock->write(&wcb, "abc", 3);
+
+  SSLHandshakeServer server(std::move(serverSockPtr), true, true);
+  eventBase.loop();
+
+  EXPECT_FALSE(server.handshakeSuccess_);
+}
+
+#if FOLLY_OPENSSL_PREREQ(1, 1, 1)
+TEST(AsyncSSLSocketTest, TestSSLSetClientOptionsP256) {
+  EventBase evb;
+  std::array<NetworkSocket, 2> fds;
+  getfds(fds.data());
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto serverCtx = std::make_shared<SSLContext>();
+  serverCtx->setSupportedGroups(std::vector<std::string>({"P-256"}));
+  serverCtx->loadCertificate(kTestCert);
+  serverCtx->loadPrivateKey(kTestKey);
+  ssl::SSLCommonOptions::setClientOptions(*clientCtx);
+
+  auto clientSocket =
+      AsyncSSLSocket::newSocket(clientCtx, &evb, fds[0], false, true);
+  std::shared_ptr<AsyncSSLSocket> serverSocket =
+      AsyncSSLSocket::newSocket(serverCtx, &evb, fds[1], true, true);
+
+  ReadCallbackTerminator readCallback(&evb, nullptr);
+  serverSocket->setReadCB(&readCallback);
+  readCallback.setSocket(serverSocket);
+  serverSocket->sslAccept(nullptr);
+  clientSocket->sslConn(nullptr);
+
+  uint8_t buf[128];
+  memset(buf, 'a', sizeof(buf));
+  clientSocket->write(nullptr, buf, sizeof(buf));
+
+  EventBaseAborter eba(&evb, 3000);
+
+  evb.loop();
+
+  auto sharedGroupName = serverSocket->getNegotiatedGroup();
+  EXPECT_THAT(sharedGroupName, testing::HasSubstr("prime256v1"));
+}
+
+TEST(AsyncSSLSocketTest, TestSSLSetClientOptionsX25519) {
+  EventBase evb;
+  std::array<NetworkSocket, 2> fds;
+  getfds(fds.data());
+  auto clientCtx = std::make_shared<SSLContext>();
+  auto serverCtx = std::make_shared<SSLContext>();
+  serverCtx->setSupportedGroups(std::vector<std::string>({"X25519", "P-256"}));
+  serverCtx->loadCertificate(kTestCert);
+  serverCtx->loadPrivateKey(kTestKey);
+  ssl::SSLCommonOptions::setClientOptions(*clientCtx);
+
+  auto clientSocket =
+      AsyncSSLSocket::newSocket(clientCtx, &evb, fds[0], false, true);
+  std::shared_ptr<AsyncSSLSocket> serverSocket =
+      AsyncSSLSocket::newSocket(serverCtx, &evb, fds[1], true, true);
+
+  ReadCallbackTerminator readCallback(&evb, nullptr);
+  serverSocket->setReadCB(&readCallback);
+  readCallback.setSocket(serverSocket);
+  serverSocket->sslAccept(nullptr);
+  clientSocket->sslConn(nullptr);
+
+  uint8_t buf[128];
+  memset(buf, 'a', sizeof(buf));
+  clientSocket->write(nullptr, buf, sizeof(buf));
+
+  EventBaseAborter eba(&evb, 3000);
+
+  evb.loop();
+
+  auto sharedGroupName = serverSocket->getNegotiatedGroup();
+  EXPECT_THAT(sharedGroupName, testing::HasSubstr("X25519"));
+}
+#endif
 
 /**
  * Test overriding the flags passed to "sendmsg()" system call,

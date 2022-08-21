@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ class BasicTransportCertificate : public folly::OpenSSLTransportCertificate {
       return nullptr;
     }
     return std::make_unique<BasicTransportCertificate>(
-        cert->getIdentity(), cert->getX509());
+        cert->getIdentity(), OpenSSLTransportCertificate::tryExtractX509(cert));
   }
 
   BasicTransportCertificate(

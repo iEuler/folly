@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,17 @@
 
 #if FOLLY_HAS_COROUTINES
 
-#if __has_include(<coroutine>)
+// libc++'s <coroutine> header only provides its declarations for C++20 and
+// above, so we need to fall back to <experimental/coroutine> when building with
+// C++17.
+#if __has_include(<coroutine>) && !defined(LLVM_COROUTINES) && \
+    (!defined(_LIBCPP_VERSION) || __cplusplus > 201703L)
+#define FOLLY_USE_STD_COROUTINE 1
+#else
+#define FOLLY_USE_STD_COROUTINE 0
+#endif
+
+#if FOLLY_USE_STD_COROUTINE
 #include <coroutine>
 #else
 #include <experimental/coroutine>
@@ -45,9 +55,14 @@
 
 #if FOLLY_HAS_COROUTINES
 
+namespace folly {
+class exception_wrapper;
+struct AsyncStackFrame;
+} // namespace folly
+
 namespace folly::coro {
 
-#if __has_include(<coroutine>)
+#if FOLLY_USE_STD_COROUTINE
 namespace impl = std;
 #else
 namespace impl = std::experimental;
@@ -165,6 +180,88 @@ class variant_awaitable : private std::variant<A...> {
 };
 
 #endif // __has_include(<variant>)
+
+class ExtendedCoroutineHandle;
+
+// Extended promise interface folly::coro types are expected to implement
+class ExtendedCoroutinePromise {
+ public:
+  virtual coroutine_handle<> getHandle() = 0;
+  // Types may provide a more efficient resumption path when they know they will
+  // be receiving an error result from the awaitee.
+  // If they do, they might also update the active stack frame.
+  virtual std::pair<ExtendedCoroutineHandle, AsyncStackFrame*> getErrorHandle(
+      exception_wrapper&) = 0;
+
+ protected:
+  ~ExtendedCoroutinePromise() = default;
+};
+
+// Extended version of coroutine_handle<void>
+// Assumes (and enforces) assumption that coroutine_handle is a pointer
+class ExtendedCoroutineHandle {
+ public:
+  template <typename Promise>
+  /*implicit*/ ExtendedCoroutineHandle(
+      coroutine_handle<Promise> handle) noexcept
+      : basic_(handle), extended_(fromBasic(handle)) {}
+
+  /*implicit*/ ExtendedCoroutineHandle(coroutine_handle<> handle) noexcept
+      : basic_(handle) {}
+
+  /*implicit*/ ExtendedCoroutineHandle(ExtendedCoroutinePromise* ptr) noexcept
+      : basic_(ptr->getHandle()), extended_(ptr) {}
+
+  ExtendedCoroutineHandle() noexcept = default;
+
+  void resume() { basic_.resume(); }
+
+  void destroy() { basic_.destroy(); }
+
+  coroutine_handle<> getHandle() const noexcept { return basic_; }
+
+  ExtendedCoroutinePromise* getPromise() const noexcept { return extended_; }
+
+  std::pair<ExtendedCoroutineHandle, AsyncStackFrame*> getErrorHandle(
+      exception_wrapper& ex) {
+    if (extended_) {
+      return extended_->getErrorHandle(ex);
+    }
+    return {basic_, nullptr};
+  }
+
+  explicit operator bool() const noexcept { return !!basic_; }
+
+ private:
+  template <typename Promise>
+  static auto fromBasic(coroutine_handle<Promise> handle) noexcept {
+    if constexpr (std::is_convertible_v<Promise*, ExtendedCoroutinePromise*>) {
+      return static_cast<ExtendedCoroutinePromise*>(&handle.promise());
+    } else {
+      return nullptr;
+    }
+  }
+
+  coroutine_handle<> basic_;
+  ExtendedCoroutinePromise* extended_{nullptr};
+};
+
+template <typename Promise>
+class ExtendedCoroutinePromiseImpl : public ExtendedCoroutinePromise {
+ public:
+  coroutine_handle<> getHandle() final {
+    return coroutine_handle<Promise>::from_promise(
+        *static_cast<Promise*>(this));
+  }
+
+  std::pair<ExtendedCoroutineHandle, AsyncStackFrame*> getErrorHandle(
+      exception_wrapper&) override {
+    return {getHandle(), nullptr};
+  }
+
+ protected:
+  ~ExtendedCoroutinePromiseImpl() = default;
+};
 
 } // namespace folly::coro
 

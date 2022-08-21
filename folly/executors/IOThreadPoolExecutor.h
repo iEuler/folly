@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,12 @@
 
 #pragma once
 
-#include <atomic>
-
 #include <folly/Portability.h>
 #include <folly/executors/IOExecutor.h>
+#include <folly/executors/QueueObserver.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 #include <folly/io/async/EventBaseManager.h>
+#include <folly/synchronization/RelaxedAtomic.h>
 
 namespace folly {
 
@@ -57,12 +57,28 @@ FOLLY_MSVC_DISABLE_WARNING(4250)
  */
 class IOThreadPoolExecutor : public ThreadPoolExecutor, public IOExecutor {
  public:
+  struct Options {
+    Options() : waitForAll(false), enableThreadIdCollection(false) {}
+
+    Options& setWaitForAll(bool b) {
+      this->waitForAll = b;
+      return *this;
+    }
+    Options& setEnableThreadIdCollection(bool b) {
+      this->enableThreadIdCollection = b;
+      return *this;
+    }
+
+    bool waitForAll;
+    bool enableThreadIdCollection;
+  };
+
   explicit IOThreadPoolExecutor(
       size_t numThreads,
       std::shared_ptr<ThreadFactory> threadFactory =
           std::make_shared<NamedThreadFactory>("IOThreadPool"),
       folly::EventBaseManager* ebm = folly::EventBaseManager::get(),
-      bool waitForAll = false);
+      Options options = Options());
 
   IOThreadPoolExecutor(
       size_t maxThreads,
@@ -70,7 +86,7 @@ class IOThreadPoolExecutor : public ThreadPoolExecutor, public IOExecutor {
       std::shared_ptr<ThreadFactory> threadFactory =
           std::make_shared<NamedThreadFactory>("IOThreadPool"),
       folly::EventBaseManager* ebm = folly::EventBaseManager::get(),
-      bool waitForAll = false);
+      Options options = Options());
 
   ~IOThreadPoolExecutor() override;
 
@@ -82,11 +98,23 @@ class IOThreadPoolExecutor : public ThreadPoolExecutor, public IOExecutor {
 
   folly::EventBase* getEventBase() override;
 
+  // Ensures that the maximum number of active threads is running and returns
+  // the EventBase associated with each thread.
+  std::vector<folly::Executor::KeepAlive<folly::EventBase>> getAllEventBases();
+
   static folly::EventBase* getEventBase(ThreadPoolExecutor::ThreadHandle*);
+
+  static std::mutex* getEventBaseShutdownMutex(
+      ThreadPoolExecutor::ThreadHandle*);
 
   folly::EventBaseManager* getEventBaseManager();
 
- private:
+  // Returns nullptr unless explicitly enabled through constructor
+  folly::WorkerProvider* getThreadIdCollector() {
+    return threadIdCollector_.get();
+  }
+
+ protected:
   struct alignas(Thread) IOThread : public Thread {
     IOThread(IOThreadPoolExecutor* pool)
         : Thread(pool), shouldRun(true), pendingTasks(0) {}
@@ -96,15 +124,18 @@ class IOThreadPoolExecutor : public ThreadPoolExecutor, public IOExecutor {
     std::mutex eventBaseShutdownMutex_;
   };
 
+ private:
   ThreadPtr makeThread() override;
   std::shared_ptr<IOThread> pickThread();
   void threadRun(ThreadPtr thread) override;
   void stopThreads(size_t n) override;
   size_t getPendingTaskCountImpl() const override final;
 
-  std::atomic<size_t> nextThread_;
+  const bool isWaitForAll_; // whether to wait till event base loop exits
+  relaxed_atomic<size_t> nextThread_;
   folly::ThreadLocal<std::shared_ptr<IOThread>> thisThread_;
   folly::EventBaseManager* eventBaseManager_;
+  std::unique_ptr<ThreadIdWorkerProvider> threadIdCollector_;
 };
 
 FOLLY_POP_WARNING

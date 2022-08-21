@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,6 +57,8 @@ class SemaphoreBase {
 
   size_t getCapacity() const;
 
+  size_t getAvailableTokens() const;
+
  protected:
   /*
    * Wait for request capacity in the semaphore.
@@ -99,7 +101,7 @@ class SemaphoreBase {
   SemiFuture<Unit> future_wait_common(int64_t tokens);
 
   bool waitSlow(Waiter& waiter, int64_t tokens);
-  bool signalSlow(int64_t tokens, int64_t oldVal);
+  bool signalSlow(int64_t tokens);
 
   size_t capacity_;
   // Atomic counter

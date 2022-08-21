@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,12 +25,14 @@
 
 #include <folly/Optional.h>
 #include <folly/Traits.h>
+#include <folly/container/Foreach.h>
 #include <folly/detail/AsyncTrace.h>
 #include <folly/executors/ExecutorWithPriority.h>
 #include <folly/executors/GlobalExecutor.h>
 #include <folly/executors/InlineExecutor.h>
 #include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/futures/detail/Core.h>
+#include <folly/lang/Pretty.h>
 
 namespace folly {
 
@@ -361,35 +363,6 @@ FutureBase<T>::thenImplementation(
   auto f = Future<B>(sf.core_);
   sf.core_ = nullptr;
 
-  /* This is a bit tricky.
-
-     We can't just close over *this in case this Future gets moved. So we
-     make a new dummy Future. We could figure out something more
-     sophisticated that avoids making a new Future object when it can, as an
-     optimization. But this is correct.
-
-     core_ can't be moved, it is explicitly disallowed (as is copying). But
-     if there's ever a reason to allow it, this is one place that makes that
-     assumption and would need to be fixed. We use a standard shared pointer
-     for core_ (by copying it in), which means in essence obj holds a shared
-     pointer to itself.  But this shouldn't leak because Promise will not
-     outlive the continuation, because Promise will setException() with a
-     broken Promise if it is destructed before completed. We could use a
-     weak pointer but it would have to be converted to a shared pointer when
-     func is executed (because the Future returned by func may possibly
-     persist beyond the callback, if it gets moved), and so it is an
-     optimization to just make it shared from the get-go.
-
-     Two subtle but important points about this design. futures::detail::Core
-     has no back pointers to Future or Promise, so if Future or Promise get
-     moved (and they will be moved in performant code) we don't have to do
-     anything fancy. And because we store the continuation in the
-     futures::detail::Core, not in the Future, we can execute the continuation
-     even after the Future has gone out of scope. This is an intentional design
-     decision. It is likely we will want to be able to cancel a continuation
-     in some circumstances, but I think it should be explicit not implicit
-     in the destruction of the Future used to create it.
-     */
   this->setCallback_(
       [state = futures::detail::makeCoreCallbackState(
            std::move(p), static_cast<F&&>(func))](
@@ -488,6 +461,7 @@ class WaitExecutor final : public folly::Executor {
 
   void drive() {
     baton_.wait();
+
     fibers::runInMainContext([&]() {
       baton_.reset();
       auto funcs = std::move(queue_.wlock()->funcs);
@@ -587,9 +561,6 @@ makeSemiFutureWith(F&& func) {
   using InnerType = typename isFutureOrSemiFuture<invoke_result_t<F>>::Inner;
   try {
     return static_cast<F&&>(func)();
-  } catch (std::exception& e) {
-    return makeSemiFuture<InnerType>(
-        exception_wrapper(std::current_exception(), e));
   } catch (...) {
     return makeSemiFuture<InnerType>(
         exception_wrapper(std::current_exception()));
@@ -837,6 +808,16 @@ SemiFuture<T> SemiFuture<T>::deferError(F&& func) && {
         } else {
           return makeSemiFuture<T>(std::move(t));
         }
+      });
+}
+
+template <class T>
+template <class F>
+SemiFuture<T> SemiFuture<T>::deferEnsure(F&& func) && {
+  return std::move(*this).defer(
+      [func = static_cast<F&&>(func)](Try<T>&& t) mutable {
+        static_cast<F&&>(func)();
+        return makeSemiFuture<T>(std::move(t));
       });
 }
 
@@ -1239,9 +1220,6 @@ typename std::
   using InnerType = typename isFuture<invoke_result_t<F>>::Inner;
   try {
     return static_cast<F&&>(func)();
-  } catch (std::exception& e) {
-    return makeFuture<InnerType>(
-        exception_wrapper(std::current_exception(), e));
   } catch (...) {
     return makeFuture<InnerType>(exception_wrapper(std::current_exception()));
   }
@@ -1457,11 +1435,18 @@ collect(InputIterator first, InputIterator last) {
     ~Context() {
       if (!threw.load(std::memory_order_relaxed)) {
         // map Optional<T> -> T
-        std::transform(
-            result.begin(),
-            result.end(),
-            std::back_inserter(finalResult),
-            [](Optional<T>& o) { return std::move(o.value()); });
+        for (auto& value : result) {
+          // if any of the input futures were off the end of a weakRef(), the
+          // logic added in setCallback_ will not execute as an executor
+          // weakRef() drops all callbacks added silently without executing them
+          if (!value.has_value()) {
+            p.setException(BrokenPromise{pretty_name<std::vector<T>>()});
+            return;
+          }
+
+          finalResult.push_back(std::move(value.value()));
+        }
+
         p.setValue(std::move(finalResult));
       }
     }
@@ -1515,7 +1500,21 @@ SemiFuture<std::tuple<typename remove_cvref_t<Fs>::value_type...>> collect(
   struct Context {
     ~Context() {
       if (!threw.load(std::memory_order_relaxed)) {
-        p.setValue(unwrapTryTuple(std::move(results)));
+        // if any of the input futures were off the end of a weakRef(), the
+        // logic added in setCallback_ will not execute as an executor
+        // weakRef() drops all callbacks added silently without executing them
+        auto brokenPromise = false;
+        folly::for_each(results, [&](auto& result) {
+          if (!result.hasValue() && !result.hasException()) {
+            brokenPromise = true;
+          }
+        });
+
+        if (brokenPromise) {
+          p.setException(BrokenPromise{pretty_name<Result>()});
+        } else {
+          p.setValue(unwrapTryTuple(std::move(results)));
+        }
       }
     }
     Promise<Result> p;
@@ -1826,10 +1825,10 @@ std::vector<Future<Result>> window(
 // reduce
 
 template <class T>
-template <class I, class F>
-Future<I> Future<T>::reduce(I&& initial, F&& func) && {
+template <class In, class F>
+Future<In> Future<T>::reduce(In&& initial, F&& func) && {
   return std::move(*this).thenValue(
-      [minitial = static_cast<I&&>(initial),
+      [minitial = static_cast<In&&>(initial),
        mfunc = static_cast<F&&>(func)](T&& vals) mutable {
         auto ret = std::move(minitial);
         for (auto& val : vals) {
@@ -1915,8 +1914,6 @@ SemiFuture<T> unorderedReduceSemiFuture(It first, It last, T initial, F func) {
                 ctx->func_(
                     std::move(v.value()),
                     mt.template get<IsTry::value, Arg&&>()));
-          } catch (std::exception& e) {
-            ew = exception_wrapper{std::current_exception(), e};
           } catch (...) {
             ew = exception_wrapper{std::current_exception()};
           }

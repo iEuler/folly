@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,7 +98,7 @@ class BlockingWaitPromise final : public BlockingWaitPromiseBase {
 
   void unhandled_exception() noexcept {
     result_->emplaceException(
-        folly::exception_wrapper::from_exception_ptr(std::current_exception()));
+        folly::exception_wrapper{std::current_exception()});
   }
 
   template <
@@ -126,7 +126,7 @@ class BlockingWaitPromise<T&> final : public BlockingWaitPromiseBase {
 
   void unhandled_exception() noexcept {
     result_->emplaceException(
-        folly::exception_wrapper::from_exception_ptr(std::current_exception()));
+        folly::exception_wrapper{std::current_exception()});
   }
 
   auto yield_value(T&& value) noexcept {
@@ -171,8 +171,7 @@ class BlockingWaitPromise<void> final : public BlockingWaitPromiseBase {
   void return_void() noexcept {}
 
   void unhandled_exception() noexcept {
-    result_->emplaceException(
-        exception_wrapper::from_exception_ptr(std::current_exception()));
+    result_->emplaceException(exception_wrapper{std::current_exception()});
   }
 
   void setTry(folly::Try<void>* result) noexcept { result_ = result; }
@@ -299,7 +298,7 @@ auto makeRefBlockingWaitTask(Awaitable&& awaitable)
 
 class BlockingWaitExecutor final : public folly::DrivableExecutor {
  public:
-  ~BlockingWaitExecutor() {
+  ~BlockingWaitExecutor() override {
     while (keepAliveCount_.load() > 0) {
       drive();
     }

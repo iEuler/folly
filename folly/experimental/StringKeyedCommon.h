@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,8 @@ template <class Alloc>
 StringPiece stringPieceDup(StringPiece piece, const Alloc& alloc) {
   auto size = piece.size();
   auto keyDup =
-      typename Alloc::template rebind<char>::other(alloc).allocate(size);
+      typename std::allocator_traits<Alloc>::template rebind_alloc<char>(alloc)
+          .allocate(size);
   if (size) {
     memcpy(
         keyDup, piece.data(), size * sizeof(typename StringPiece::value_type));
@@ -38,8 +39,8 @@ StringPiece stringPieceDup(StringPiece piece, const Alloc& alloc) {
 
 template <class Alloc>
 void stringPieceDel(StringPiece piece, const Alloc& alloc) {
-  typename Alloc::template rebind<char>::other(alloc).deallocate(
-      const_cast<char*>(piece.data()), piece.size());
+  typename std::allocator_traits<Alloc>::template rebind_alloc<char>(alloc)
+      .deallocate(const_cast<char*>(piece.data()), piece.size());
 }
 
 } // namespace folly

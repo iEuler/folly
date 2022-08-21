@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,27 +43,43 @@ class ObserverCreatorContext {
   }
 
   std::shared_ptr<const T> get() {
-    auto state = state_.lock();
+    auto state = state_.wlock();
     state->updateRequested = false;
     return state->value;
   }
 
-  void update() {
-    // This mutex ensures there's no race condition between initial update()
-    // call and update() calls from the subsciption callback.
-    //
-    // Additionally it helps avoid races between two different subscription
-    // callbacks (getting new value from observable and storing it into value_
-    // is not atomic).
-    auto state = state_.lock();
-    if (!state->updateValue(Traits::get(observable_))) {
-      // Value didn't change, so we can skip the version update.
-      return;
+  observer_detail::Core::Ptr update() noexcept {
+    try {
+      // This mutex ensures there's no race condition between initial update()
+      // call and update() calls from the subsciption callback.
+      //
+      // Additionally it helps avoid races between two different subscription
+      // callbacks (getting new value from observable and storing it into value_
+      // is not atomic).
+      //
+      // Note that state_ lock is acquired only after Traits::get. Traits::get
+      // is running application code (that may acquire locks) and so it's
+      // important to not hold state_ lock while running it to avoid possible
+      // lock inversion with another code path that needs state_ lock (e.g.
+      // get()).
+      std::lock_guard<SharedMutex> updateLockGuard(updateLock_);
+      auto newValue = Traits::get(observable_);
+
+      auto state = state_.wlock();
+      if (!state->updateValue(std::move(newValue))) {
+        // Value didn't change, so we can skip the version update.
+        return nullptr;
+      }
+
+      if (!std::exchange(state->updateRequested, true)) {
+        return coreWeak_.lock();
+      }
+    } catch (...) {
+      LOG(ERROR) << "Observer update failed: "
+                 << folly::exceptionStr(std::current_exception());
     }
 
-    if (!std::exchange(state->updateRequested, true)) {
-      observer_detail::ObserverManager::scheduleRefreshNewVersion(coreWeak_);
-    }
+    return nullptr;
   }
 
   template <typename F>
@@ -72,6 +88,7 @@ class ObserverCreatorContext {
   }
 
  private:
+  SharedMutex updateLock_;
   struct State {
     bool updateValue(std::shared_ptr<const T> newValue) {
       auto newValuePtr = newValue.get();
@@ -85,7 +102,7 @@ class ObserverCreatorContext {
     std::shared_ptr<const T> value;
     bool updateRequested{false};
   };
-  folly::Synchronized<State, std::mutex> state_;
+  folly::Synchronized<State> state_;
 
   observer_detail::Core::WeakPtr coreWeak_;
 
@@ -148,16 +165,22 @@ ObserverCreator<Observable, Traits>::getObserver() && {
       [context = std::move(contextPrimary)]() { return context->get(); });
 
   context_->setCore(observer.core_);
-  context_->subscribe([contextWeak = std::move(contextWeak)] {
-    if (auto context = contextWeak.lock()) {
-      context->update();
-    }
-  });
+
+  auto scheduleUpdate = [contextWeak = std::move(contextWeak)] {
+    observer_detail::ObserverManager::scheduleRefreshNewVersion(
+        [contextWeak]() -> observer_detail::Core::Ptr {
+          if (auto context = contextWeak.lock()) {
+            return context->update();
+          }
+          return nullptr;
+        });
+  };
+
+  context_->subscribe(scheduleUpdate);
 
   // Do an extra update in case observable was updated between observer creation
   // and setting updates callback.
-  context_->update();
-  context_.reset();
+  scheduleUpdate();
 
   return observer;
 }

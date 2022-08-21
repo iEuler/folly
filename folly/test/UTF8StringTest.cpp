@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,8 @@
 using namespace folly;
 using namespace std;
 
-const folly::StringPiece kTestUTF8 = u8"This is \U0001F602 stuff!";
+const folly::StringPiece kTestUTF8 =
+    reinterpret_cast<const char*>(u8"This is \U0001F602 stuff!");
 
 TEST(UTF8StringPiece, valid_utf8) {
   folly::StringPiece sp = kTestUTF8;
@@ -47,7 +48,8 @@ TEST(UTF8StringPiece, invalid_mid_codepoint) {
 }
 
 TEST(UTF8StringPiece, valid_implicit_conversion) {
-  std::string input = u8"\U0001F602\U0001F602\U0001F602";
+  std::string input =
+      reinterpret_cast<const char*>(u8"\U0001F602\U0001F602\U0001F602");
   auto checkImplicitCtor = [](UTF8StringPiece implicitCtor) {
     return implicitCtor.walk_size();
   };

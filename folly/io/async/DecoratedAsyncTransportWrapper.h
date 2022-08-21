@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -152,6 +152,14 @@ class DecoratedAsyncTransportWrapper : public folly::AsyncTransport {
 
   std::string getSecurityProtocol() const override {
     return transport_->getSecurityProtocol();
+  }
+
+  std::unique_ptr<IOBuf> getExportedKeyingMaterial(
+      folly::StringPiece label,
+      std::unique_ptr<IOBuf> context,
+      uint16_t length) const override {
+    return transport_->getExportedKeyingMaterial(
+        label, std::move(context), length);
   }
 
   bool isReplaySafe() const override { return transport_->isReplaySafe(); }

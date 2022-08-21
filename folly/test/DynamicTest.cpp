@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include <folly/dynamic.h>
 
+#include <cmath>
 #include <iterator>
 
 #include <glog/logging.h>
@@ -23,9 +24,15 @@
 #include <folly/Range.h>
 #include <folly/json.h>
 #include <folly/portability/GTest.h>
+#include <folly/test/ComparisonOperatorTestUtil.h>
 
 using folly::dynamic;
 using folly::StringPiece;
+
+namespace folly {
+namespace test {
+
+using namespace detail;
 
 TEST(Dynamic, Default) {
   dynamic obj;
@@ -96,6 +103,34 @@ TEST(Dynamic, ObjectBasics) {
 
   dynamic obj2 = dynamic::object;
   EXPECT_TRUE(obj2.isObject());
+
+  dynamic obj3 = dynamic::object("a", false);
+  EXPECT_EQ(obj3.at("a"), false);
+  EXPECT_EQ(obj3.size(), 1);
+  {
+    const auto [it, inserted] = obj3.emplace("a", true);
+    EXPECT_EQ(obj3.size(), 1);
+    EXPECT_FALSE(inserted);
+    EXPECT_EQ(it->second, false);
+  }
+  {
+    const auto [it, inserted] = obj3.emplace("b", true);
+    EXPECT_EQ(obj3.size(), 2);
+    EXPECT_TRUE(inserted);
+    EXPECT_EQ(it->second, true);
+  }
+  {
+    const auto [it, inserted] = obj3.try_emplace("a", true);
+    EXPECT_EQ(obj3.size(), 2);
+    EXPECT_FALSE(inserted);
+    EXPECT_EQ(it->second, false);
+  }
+  {
+    const auto [it, inserted] = obj3.try_emplace("c", true);
+    EXPECT_EQ(obj3.size(), 3);
+    EXPECT_TRUE(inserted);
+    EXPECT_EQ(it->second, true);
+  }
 
   dynamic d3 = nullptr;
   EXPECT_TRUE(d3 == nullptr);
@@ -442,6 +477,16 @@ TEST(Dynamic, ArrayBasics) {
   EXPECT_EQ(array[11], "something");
 }
 
+TEST(Dynamic, Reserve) {
+  // reserve() has no observable behavior, so we only check that it can be
+  // called on the supported types.
+  dynamic{dynamic::array}.reserve(10);
+  dynamic{dynamic::object}.reserve(10);
+  dynamic{std::string{}}.reserve(10);
+  EXPECT_THROW(dynamic{}.reserve(10), folly::TypeError);
+  EXPECT_THROW(dynamic{1}.reserve(10), folly::TypeError);
+}
+
 TEST(Dynamic, DeepCopy) {
   dynamic val = dynamic::array("foo", "bar", dynamic::array("foo1", "bar1"));
   EXPECT_EQ(val.at(2).at(0), "foo1");
@@ -498,6 +543,234 @@ TEST(Dynamic, Operator) {
   dynamic nums = 4;
   dynamic math = some / nums;
   EXPECT_EQ(math, 3);
+}
+
+namespace {
+
+void testOrderingOperatorsThrowForObjectTypes(
+    const dynamic& valueA, const dynamic& valueB) {
+  ASSERT_TRUE(valueA.isObject() || valueB.isObject())
+      << "This function is only intended for objects";
+
+  // The compiler will complain with "relational comparison result unused" if
+  // we don't send the result of comparison operations somewhere. So we just use
+  // an empty lambda which seems to satisfy it.
+  auto swallow = [](bool /*unused*/) {};
+
+#define FB_EXPECT_THROW(boolExpr) \
+  EXPECT_THROW(swallow(boolExpr), folly::TypeError)
+
+  FB_EXPECT_THROW(valueA < valueB);
+  FB_EXPECT_THROW(valueB < valueA);
+
+  FB_EXPECT_THROW(valueA <= valueB);
+  FB_EXPECT_THROW(valueB <= valueA);
+
+  FB_EXPECT_THROW(valueA >= valueB);
+  FB_EXPECT_THROW(valueB >= valueA);
+
+  FB_EXPECT_THROW(valueA > valueB);
+  FB_EXPECT_THROW(valueB > valueA);
+
+#undef FB_EXPECT_THROW
+}
+
+void testComparisonOperatorsForEqualDynamicValues(
+    const dynamic& valueA, const dynamic& valueB) {
+  testEqualityOperatorsForEqualValues(valueA, valueB);
+
+  if (valueA.isObject() || valueB.isObject()) {
+    // Objects don't support ordering
+    testOrderingOperatorsThrowForObjectTypes(valueA, valueB);
+  } else {
+    testOrderingOperatorsForEqualValues(valueA, valueB);
+  }
+  EXPECT_EQ(valueA.hash(), valueB.hash());
+}
+
+void testComparisonOperatorsForNotEqualDynamicValues(
+    const dynamic& smallerValue, const dynamic& largerValue) {
+  testEqualityOperatorsForNotEqualValues(smallerValue, largerValue);
+
+  if (smallerValue.isObject() || largerValue.isObject()) {
+    // Objects don't support ordering
+    testOrderingOperatorsThrowForObjectTypes(smallerValue, largerValue);
+  } else {
+    testOrderingOperatorsForNotEqualValues(smallerValue, largerValue);
+  }
+}
+
+// Calls func on all index pair permutations of 0 to (numValues - 1) where
+// smallerIndex < largerIndex.
+void executeOnOrderedIndexPairs(
+    size_t numValues,
+    std::function<void(size_t smallerIndex, size_t largerIndex)> func) {
+  // The `Idx` naming below is used to avoid local variable shadow warnings with
+  // the func parameter names, which are unnecessary but serving as
+  // documentation.
+  for (size_t smallerIdx = 0; smallerIdx < numValues; ++smallerIdx) {
+    for (size_t largerIdx = smallerIdx + 1; largerIdx < numValues;
+         ++largerIdx) {
+      func(smallerIdx, largerIdx);
+    }
+  }
+}
+
+using int64Limits = std::numeric_limits<int64_t>;
+using doubleLimits = std::numeric_limits<double>;
+
+double nextLower(double value) {
+  return std::nextafter(value, doubleLimits::lowest());
+}
+
+double nextHigher(double value) {
+  return std::nextafter(value, doubleLimits::max());
+}
+
+// Returns values of each type of dynamic, sorted in strictly increasing order
+// as defined by dynamic::operator<
+std::vector<dynamic> getUniqueOrderedValuesForAllTypes() {
+  return {
+      // NULLT
+      nullptr,
+
+      // ARRAY
+      dynamic::array(0, 1, 2),
+      dynamic::array(2, 0, 1),
+
+      // BOOL
+      false,
+      true,
+
+      // DOUBLE / INT64
+      doubleLimits::lowest(),
+      nextLower(-1.0 * std::pow(2.0, 63)),
+      int64Limits::lowest(),
+      int64Limits::lowest() + 1,
+      -1.1,
+      -1,
+      2,
+      2.2,
+      int64Limits::max() - 1,
+      int64Limits::max(),
+      doubleLimits::max(),
+      doubleLimits::infinity(),
+
+      // OBJECT - NOTE these don't actually have ordering comparison, so could
+      // be anywhere
+      dynamic::object("a", dynamic::array(1, 2, 3)),
+      dynamic::object("b", dynamic::array(1, 2, 3)),
+
+      // STRING
+      "abc",
+      "def",
+  };
+}
+
+std::vector<std::pair<dynamic, dynamic>> getNumericallyEqualPairs() {
+  auto getDoubleInt64Pair =
+      [](int64_t valueAsInt64) -> std::pair<dynamic, dynamic> {
+    return {valueAsInt64, static_cast<double>(valueAsInt64)};
+  };
+
+  return {
+      {-2.0, -2},
+      {0.0, 0},
+      {1.0, 1},
+
+      // Represents int64 min
+      getDoubleInt64Pair(folly::to_integral(std::pow(-2.0, 63))),
+
+      // Whatever double comes after int64 min
+      getDoubleInt64Pair(folly::to_integral(nextHigher(std::pow(-2.0, 63)))),
+
+      // Note int64 max can't be represented in double since it is (2^63 - 1)
+      // and at that range doubles only go in step sizes of 1024. So just go to
+      // whatever is closest.
+      getDoubleInt64Pair(folly::to_integral(nextLower(std::pow(2.0, 63)))),
+
+      {dynamic::array(1.0), dynamic::array(1)},
+      {dynamic::object("a", dynamic::array(1.0)),
+       dynamic::object("a", dynamic::array(1))},
+  };
+}
+
+} // namespace
+
+TEST(Dynamic, ComparisonOperatorsOnNotEqualValuesOfAllTypes) {
+  auto values = getUniqueOrderedValuesForAllTypes();
+
+  // Test ordering operators
+  executeOnOrderedIndexPairs(
+      values.size(), [&](size_t smallerIndex, size_t largerIndex) {
+        testComparisonOperatorsForNotEqualDynamicValues(
+            values[smallerIndex] /*smallerValue*/,
+            values[largerIndex] /*largerValue*/);
+      });
+}
+
+TEST(Dynamic, ComparisonOperatorsOnSameValuesOfSameTypes) {
+  for (const auto& value : getUniqueOrderedValuesForAllTypes()) {
+    testComparisonOperatorsForEqualDynamicValues(value, value);
+  }
+}
+
+TEST(Dynamic, ComparisonOperatorsForNumericallyEqualIntAndDoubles) {
+  for (const auto& [valueA, valueB] : getNumericallyEqualPairs()) {
+    testComparisonOperatorsForEqualDynamicValues(valueA, valueB);
+  }
+}
+
+TEST(Dynamic, HashDoesNotThrow) {
+  for (const auto& value : getUniqueOrderedValuesForAllTypes()) {
+    EXPECT_NO_THROW(std::hash<dynamic>()(value)) << value;
+  }
+}
+
+namespace {
+template <typename TExpectedHashType>
+void verifyHashMatches(double value) {
+  EXPECT_EQ(
+      std::hash<TExpectedHashType>()(static_cast<TExpectedHashType>(value)),
+      std::hash<dynamic>()(value))
+      << "value: " << value;
+}
+} // namespace
+
+TEST(Dynamic, HashOnDoublesUsesCorrectUnderlyingHasher) {
+  verifyHashMatches<double>(-1.5);
+  verifyHashMatches<int64_t>(-1.0);
+  verifyHashMatches<int64_t>(0.0);
+  verifyHashMatches<double>(0.2);
+  verifyHashMatches<int64_t>(2.0);
+}
+
+TEST(Dynamic, HashForNumericallyEqualIntAndDoubles) {
+  for (const auto& [valueA, valueB] : getNumericallyEqualPairs()) {
+    // This is just highlighting that the same hashing functions will apply
+    // to numerically equal values.
+    EXPECT_EQ(std::hash<dynamic>()(valueA), std::hash<dynamic>()(valueB))
+        << "valueA: " << valueA << ", valueB: " << valueB;
+  }
+}
+
+TEST(Dynamic, ComparisonOperatorsForNonEquivalenctCases) {
+  // Mainly highlighting some cases for which implicit conversion is not done.
+  // Within each group they are ordered per dynamic::Type enum value.
+  std::vector<std::vector<dynamic>> notEqualValueTestCases{
+      {nullptr, false, 0},
+      {true, 1},
+      {1, "1"},
+  };
+
+  for (const auto& testCase : notEqualValueTestCases) {
+    executeOnOrderedIndexPairs(
+        testCase.size(), [&](size_t smallerIndex, size_t largerIndex) {
+          testComparisonOperatorsForNotEqualDynamicValues(
+              testCase[smallerIndex] /*smallerValue*/,
+              testCase[largerIndex] /*largerValue*/);
+        });
+  }
 }
 
 TEST(Dynamic, Conversions) {
@@ -1303,3 +1576,6 @@ TEST(Dynamic, EqualNestedValues) {
   dynamic obj2 = obj1;
   EXPECT_EQ(obj1, obj2);
 }
+
+} // namespace test
+} // namespace folly

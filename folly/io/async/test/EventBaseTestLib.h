@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -84,7 +84,7 @@ class EventBaseTest : public EventBaseTestBase {
   EventBaseTest() = default;
 };
 
-TYPED_TEST_CASE_P(EventBaseTest);
+TYPED_TEST_SUITE_P(EventBaseTest);
 
 template <typename T>
 class EventBaseTest1 : public EventBaseTestBase {
@@ -113,7 +113,7 @@ std::unique_ptr<EventBase> getEventBase(
   }
 }
 
-TYPED_TEST_CASE_P(EventBaseTest1);
+TYPED_TEST_SUITE_P(EventBaseTest1);
 
 enum { BUF_SIZE = 4096 };
 
@@ -215,9 +215,6 @@ class TestObserver : public folly::ExecutionObserver {
   virtual void stopped(uintptr_t /* id */) noexcept override {
     nestedStart_--;
     numStoppedCalled_++;
-  }
-  virtual void runnable(uintptr_t /* id */) noexcept override {
-    // Unused
   }
 
   int nestedStart_{0};
@@ -1487,13 +1484,46 @@ TYPED_TEST_P(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadAndWaitWithin) {
   });
 }
 
-TYPED_TEST_P(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadNotLooping) {
+TYPED_TEST_P(
+    EventBaseTest, RunImmediatelyOrRunInEventBaseThreadAndWaitNotLooping) {
   auto evbPtr = getEventBase<TypeParam>();
   SKIP_IF(!evbPtr) << "Backend not available";
   folly::EventBase& eb = *evbPtr;
   auto mutated = false;
   eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] { mutated = true; });
   EXPECT_TRUE(mutated);
+}
+
+TYPED_TEST_P(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadCross) {
+  auto evbPtr = getEventBase<TypeParam>();
+  SKIP_IF(!evbPtr) << "Backend not available";
+  folly::EventBase& eb = *evbPtr;
+  std::thread th(&EventBase::loopForever, &eb);
+  SCOPE_EXIT {
+    eb.terminateLoopSoon();
+    th.join();
+  };
+  // wait for loop to start
+  eb.runInEventBaseThreadAndWait([] {});
+  Baton<> baton1, baton2;
+  EXPECT_FALSE(eb.isInEventBaseThread());
+
+  eb.runImmediatelyOrRunInEventBaseThread([&] {
+    baton1.wait();
+    baton2.post();
+  });
+  EXPECT_FALSE(baton2.ready());
+  baton1.post();
+  EXPECT_TRUE(baton2.try_wait_for(std::chrono::milliseconds(100)));
+}
+
+TYPED_TEST_P(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadNotLooping) {
+  auto evbPtr = getEventBase<TypeParam>();
+  SKIP_IF(!evbPtr) << "Backend not available";
+  folly::EventBase& eb = *evbPtr;
+  Baton<> baton;
+  eb.runImmediatelyOrRunInEventBaseThread([&] { baton.post(); });
+  EXPECT_TRUE(baton.ready());
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1592,6 +1622,38 @@ TYPED_TEST_P(EventBaseTest, RunInLoopStopLoop) {
   // this a hard API requirement.)
   ASSERT_GE(c1.getCount(), 10);
   ASSERT_LE(c1.getCount(), 11);
+}
+
+// Test loopPool() call sequence
+TYPED_TEST_P(EventBaseTest, RunPoolLoop) {
+  auto evbPtr = getEventBase<TypeParam>();
+  SKIP_IF(!evbPtr) << "Backend not available";
+  folly::EventBase& eventBase = *evbPtr;
+  std::atomic<bool> running = true;
+  int calls = 0;
+
+  CountedLoopCallback c1(&eventBase, 20);
+  CountedLoopCallback c2(
+      &eventBase, 10, [eb = &eventBase, running = &running]() {
+        eb->terminateLoopSoon();
+        running->store(false);
+      });
+
+  eventBase.runInLoop(&c1);
+  eventBase.runInLoop(&c2);
+  ASSERT_EQ(c1.getCount(), 20);
+  ASSERT_EQ(c2.getCount(), 10);
+
+  eventBase.loopPollSetup();
+  while (running.load()) {
+    calls++;
+    eventBase.loopPoll();
+  }
+  eventBase.loopPollCleanup();
+
+  // We expect multiple iterations of the loop to happen, since loopPool has non
+  // blocking semantics, we should call loopPool multiple times
+  ASSERT_GT(calls, 1);
 }
 
 TYPED_TEST_P(EventBaseTest1, pidCheck) {
@@ -1937,25 +1999,17 @@ TYPED_TEST_P(EventBaseTest, IdleTime) {
   eventBase.loopOnce(EVLOOP_NONBLOCK);
   eventBase.setLoadAvgMsec(std::chrono::milliseconds(1000));
   eventBase.resetLoadAvg(5900.0);
-  auto testStart = std::chrono::steady_clock::now();
 
   int latencyCallbacks = 0;
   eventBase.setMaxLatency(std::chrono::microseconds(6000), [&]() {
     ++latencyCallbacks;
-    if (latencyCallbacks != 1) {
-      FAIL() << "Unexpected latency callback";
-    }
-
-    if (tos0.getTimeouts() < 6) {
+    if (latencyCallbacks != 1 || tos0.getTimeouts() < 6) {
       // This could only happen if the host this test is running
       // on is heavily loaded.
-      int64_t usElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - testStart)
-                              .count();
-      EXPECT_LE(43800, usElapsed);
       hostOverloaded = true;
       return;
     }
+
     EXPECT_EQ(6, tos0.getTimeouts());
     EXPECT_GE(6100, eventBase.getAvgLoopTime() - 1200);
     EXPECT_LE(6100, eventBase.getAvgLoopTime() + 1200);
@@ -1977,6 +2031,44 @@ TYPED_TEST_P(EventBaseTest, IdleTime) {
   ASSERT_LE(5900, eventBase.getAvgLoopTime() + 1200);
   ASSERT_TRUE(!!tos);
   ASSERT_EQ(21, tos->getTimeouts());
+}
+
+TYPED_TEST_P(EventBaseTest, MaxLatencyUndamped) {
+  auto eventBasePtr = getEventBase<TypeParam>();
+  folly::EventBase& eb = *eventBasePtr;
+  int maxDurationViolations = 0;
+  eb.setMaxLatency(
+      std::chrono::milliseconds{1}, [&]() { maxDurationViolations++; }, false);
+  eb.runInLoop(
+      [&]() {
+        /* sleep override */ std::this_thread::sleep_for(
+            std::chrono::microseconds{1001});
+        eb.terminateLoopSoon();
+      },
+      true);
+  eb.loop();
+  ASSERT_EQ(maxDurationViolations, 1);
+}
+
+TYPED_TEST_P(EventBaseTest, UnsetMaxLatencyUndamped) {
+  auto eventBasePtr = getEventBase<TypeParam>();
+  folly::EventBase& eb = *eventBasePtr;
+  int maxDurationViolations = 0;
+  eb.setMaxLatency(
+      std::chrono::milliseconds{1}, [&]() { maxDurationViolations++; }, false);
+  // Immediately unset it and make sure the counter isn't incremented. If the
+  // function gets called, this will raise an std::bad_function_call.
+  std::function<void()> bad_func = nullptr;
+  eb.setMaxLatency(std::chrono::milliseconds{0}, bad_func, false);
+  eb.runInLoop(
+      [&]() {
+        /* sleep override */ std::this_thread::sleep_for(
+            std::chrono::microseconds{1001});
+        eb.terminateLoopSoon();
+      },
+      true);
+  eb.loop();
+  ASSERT_EQ(maxDurationViolations, 0);
 }
 
 /**

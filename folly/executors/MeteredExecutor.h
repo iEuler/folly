@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,10 @@
 
 #pragma once
 
+#include <optional>
+
 #include <folly/DefaultKeepAliveExecutor.h>
+#include <folly/executors/QueueObserver.h>
 #include <folly/io/async/AtomicNotificationQueue.h>
 
 namespace folly {
@@ -40,37 +43,68 @@ namespace folly {
 // auto lopri_ka = getKeepAliveToken(lopri_exec.get());
 class MeteredExecutor : public DefaultKeepAliveExecutor {
  public:
+  struct Options {
+    Options() {}
+    std::string name;
+    bool enableQueueObserver{false};
+    size_t numPriorities{1};
+    int8_t priority{0};
+  };
+
   using KeepAlive = Executor::KeepAlive<>;
   // owning constructor
-  explicit MeteredExecutor(std::unique_ptr<Executor> exe);
+  explicit MeteredExecutor(
+      std::unique_ptr<Executor> exe, Options options = Options());
   // non-owning constructor
-  explicit MeteredExecutor(KeepAlive keepAlive);
+  explicit MeteredExecutor(KeepAlive keepAlive, Options options = Options());
   ~MeteredExecutor() override;
-
-  void setMaxReadAtOnce(uint32_t maxAtOnce);
 
   void add(Func func) override;
 
   size_t pendingTasks() const { return queue_.size(); }
 
  private:
+  class Task {
+   public:
+    Task() = default;
+
+    explicit Task(Func&& func) : func_(std::move(func)) {}
+
+    void setQueueObserverPayload(intptr_t newValue) {
+      queueObserverPayload_ = newValue;
+    }
+
+    intptr_t getQueueObserverPayload() const { return queueObserverPayload_; }
+
+    void run() { func_(); }
+
+    bool hasFunc() { return func_ ? true : false; }
+
+   private:
+    Func func_;
+    intptr_t queueObserverPayload_;
+  };
+
+  std::unique_ptr<folly::QueueObserver> setupQueueObserver();
   void loopCallback();
   void scheduleCallback();
 
   class Consumer {
-    Func first_;
+    std::optional<Task> first_;
     std::shared_ptr<RequestContext> firstRctx_;
     MeteredExecutor& self_;
 
    public:
     explicit Consumer(MeteredExecutor& self) : self_(self) {}
     void executeIfNotEmpty();
-    void operator()(Func&& func, std::shared_ptr<RequestContext>&& rctx);
+    void operator()(Task&& task, std::shared_ptr<RequestContext>&& rctx);
     ~Consumer();
   };
-  folly::AtomicNotificationQueue<Func> queue_;
+  Options options_;
+  folly::AtomicNotificationQueue<Task> queue_;
   std::unique_ptr<Executor> ownedExecutor_;
   KeepAlive kaInner_;
+  std::unique_ptr<folly::QueueObserver> queueObserver_{setupQueueObserver()};
 };
 
 } // namespace folly

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -254,7 +254,7 @@ TEST(Future, hasPostconditionValid) {
   DOIT(f.raise(std::logic_error("foo")));
   DOIT(f.cancel());
   DOIT(f.wait());
-  DOIT(std::move(f.wait()));
+  DOIT(std::move(f).wait());
 
 #undef DOIT
 }
@@ -332,13 +332,13 @@ TEST(Future, thenError) {
   do {                    \
     EXPECT_TRUE(theFlag); \
     theFlag = false;      \
-  } while (0);
+  } while (0)
 
 #define EXPECT_NO_FLAG()   \
   do {                     \
     EXPECT_FALSE(theFlag); \
     theFlag = false;       \
-  } while (0);
+  } while (0)
 
   // By reference
   {

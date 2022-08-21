@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ void SimpleQuantileEstimator<ClockT>::addValue(double value, TimePoint now) {
 
 template <typename ClockT>
 SlidingWindowQuantileEstimator<ClockT>::SlidingWindowQuantileEstimator(
-    std::chrono::seconds windowDuration, size_t nWindows)
+    Duration windowDuration, size_t nWindows)
     : bufferedSlidingWindow_(nWindows, windowDuration, 1000, 100) {}
 
 template <typename ClockT>

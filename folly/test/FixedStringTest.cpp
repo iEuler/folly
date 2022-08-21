@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -108,6 +108,16 @@ TEST(FixedStringCtorTest, FromStringOffsetAndCount) {
   // Out of bounds count, does not compile:
   // constexpr folly::FixedString<5> s4{s, 6, 6};
 }
+
+#if FOLLY_HAS_STRING_VIEW
+TEST(FixedStringCtorTest, FromStringView) {
+  constexpr folly::FixedString<11> s{
+      std::string_view{"hello world"},
+  };
+  static_assert(s == "hello world", "");
+  static_assert(s.size() == 11u, "");
+}
+#endif
 
 TEST(FixedStringCtorTest, FromInitializerList) {
   constexpr folly::FixedString<11> s{

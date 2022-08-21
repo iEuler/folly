@@ -62,7 +62,7 @@ highest-order unused 16 bits in a pointer as discriminator. So
 #### [`dynamic.h`](Dynamic.md)
 
 Dynamically-typed object, created with JSON objects in mind. `DynamicConverter.h` is
-a utility for effeciently converting from a `dynamic` to a more concrete structure when
+a utility for efficiently converting from a `dynamic` to a more concrete structure when
 the scheme is known (e.g. json -> `map<int,int>`).
 
 #### `EvictingCacheMap.h`
@@ -86,11 +86,11 @@ A C++ abstraction around files.
 
 Rabin fingerprinting.
 
-### [`Function.h`](Function.md)
+#### [`Function.h`](Function.md)
 
 A polymorphic wrapper for callables similar to `std::function` but not copyable and therefore able to wrap non-copyable callables, such as lambdas that capture move-only types like `std::unique_ptr` or `folly::Promise`.
 
-### [`futures/`](Futures.md)
+#### [`futures/`](Futures.md)
 
 Futures is a framework for expressing asynchronous code in C++ using the Promise/Future pattern.
 

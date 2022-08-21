@@ -13,17 +13,19 @@ builder = cmake
 [dependencies]
 boost
 cpptoml
+edencommon
 fb303
 fbthrift
 folly
-pcre
+pcre2
 googletest
 
-[dependencies.fb=on]
+[dependencies.fbsource=on]
 rust
 
 [shipit.pathmap]
-fbcode/watchman = .
+fbcode/watchman = watchman
+fbcode/watchman/oss = .
 fbcode/eden/fs = eden/fs
 
 [shipit.strip]
@@ -38,6 +40,7 @@ ENABLE_EDEN_SUPPORT=ON
 WATCHMAN_STATE_DIR=/opt/facebook/watchman/var/run/watchman
 # tell cmake not to try to create /opt/facebook/...
 INSTALL_WATCHMAN_STATE_DIR=OFF
+USE_SYS_PYTHON=OFF
 
 [depends.environment]
 WATCHMAN_VERSION_OVERRIDE

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,8 +78,7 @@ void testAllocSize(uint32_t requestedCapacity) {
 }
 
 TEST(IOBuf, AllocSizes) {
-  // cover small evil values exhaustively, including the
-  // kDefaultCombinedBufSize transition.
+  // Cover small evil values exhaustively.
   for (uint32_t i = 0; i < 1234; i++) {
     testAllocSize(i);
   }
@@ -443,7 +442,7 @@ TEST(IOBuf, Chaining) {
 
   iob1->prependChain(std::move(iob2));
   iob1->prependChain(std::move(iob4));
-  iob2ptr->appendChain(std::move(iob3));
+  iob2ptr->insertAfterThisOne(std::move(iob3));
   iob1->prependChain(std::move(iob5));
 
   EXPECT_EQ(iob2ptr, iob1->next());
@@ -640,9 +639,9 @@ TEST(IOBuf, Chaining) {
   iob4 = IOBuf::create(7);
   iob4->append(7);
   iob4ptr = iob4.get();
-  iob1->appendChain(std::move(iob2));
-  iob1->prev()->appendChain(std::move(iob3));
-  iob1->prev()->appendChain(std::move(iob4));
+  iob1->insertAfterThisOne(std::move(iob2));
+  iob1->prev()->insertAfterThisOne(std::move(iob3));
+  iob1->prev()->insertAfterThisOne(std::move(iob4));
   EXPECT_EQ(4, iob1->countChainElements());
   EXPECT_EQ(16, iob1->computeChainDataLength());
 
@@ -893,7 +892,14 @@ TEST(IOBuf, takeOwnershipUniquePtr) {
 TEST(IOBuf, Alignment) {
   size_t alignment = alignof(std::max_align_t);
 
-  std::vector<size_t> sizes{0, 1, 64, 256, 1024, 1 << 10};
+  std::vector<size_t> sizes;
+  sizes.reserve(259);
+  for (size_t i = 0; i <= 256; i++) {
+    sizes.push_back(i);
+  }
+  sizes.push_back(1024);
+  sizes.push_back(1 << 10);
+
   for (size_t size : sizes) {
     auto buf = IOBuf::create(size);
     uintptr_t p = reinterpret_cast<uintptr_t>(buf->data());
@@ -1523,8 +1529,8 @@ TEST(IOBuf, CoalesceEmptyBuffers) {
   auto b2 = fromStr("hello");
   auto b3 = IOBuf::takeOwnership(nullptr, 0);
 
-  b2->appendChain(std::move(b3));
-  b1->appendChain(std::move(b2));
+  b2->insertAfterThisOne(std::move(b3));
+  b1->insertAfterThisOne(std::move(b2));
 
   auto br = b1->coalesce();
 
@@ -1617,8 +1623,8 @@ TEST(IOBuf, fillIov) {
   auto buf3 = IOBuf::create(4096);
   append(buf3, "hello again");
 
-  buf2->appendChain(std::move(buf3));
-  buf->appendChain(std::move(buf2));
+  buf2->insertAfterThisOne(std::move(buf3));
+  buf->insertAfterThisOne(std::move(buf2));
 
   constexpr size_t iovCount = 3;
   struct iovec vec[iovCount];
@@ -1648,8 +1654,8 @@ TEST(IOBuf, fillIov2) {
   auto buf3 = IOBuf::create(4096);
   append(buf2, "hello again");
 
-  buf2->appendChain(std::move(buf3));
-  buf->appendChain(std::move(buf2));
+  buf2->insertAfterThisOne(std::move(buf3));
+  buf->insertAfterThisOne(std::move(buf2));
 
   constexpr size_t iovCount = 2;
   struct iovec vec[iovCount];
@@ -1726,4 +1732,121 @@ TEST(IOBuf, FreeFn) {
   }
   EXPECT_EQ(freeVal, 3);
   EXPECT_EQ(releaseVal, 0);
+}
+
+// Compute the chained capacity of a single non-chained IOBuf of capacity zero
+TEST(IOBuf, computeChainCapacityOfZeroSizeIOBuf) {
+  size_t size = 0;
+  uint8_t data[size];
+
+  // Create buffer of capacity 0
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data, size));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 0);
+}
+
+// Compute the chained capacity of a single non-chained IOBuf of capacity
+// non-zero
+TEST(IOBuf, computeChainCapacityOfNonZeroSizeIOBuf) {
+  size_t size = 20;
+  uint8_t data[size];
+
+  // Create buffer of capacity 20
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data, size));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 20);
+}
+
+// Compute the chained capacity of a chained IOBuf with chains having a variety
+// of zero and non-zero capacities.
+TEST(IOBuf, computeChainCapacityOfMixedCapacityChainedIOBuf) {
+  // Total capacity is 100
+  uint8_t data1[20];
+  uint8_t data2[0];
+  uint8_t data3[60];
+  uint8_t data4[15];
+  uint8_t data5[0];
+  uint8_t data6[5];
+
+  // Create IOBuf at head of chain
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data1, sizeof(data1)));
+
+  // Create IOBuf chains
+  auto temp = buf.get();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data2, sizeof(data2)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data3, sizeof(data3)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data4, sizeof(data4)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data5, sizeof(data5)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data6, sizeof(data6)));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 100);
+}
+
+TEST(IOBuf, AppendTo) {
+  using folly::range;
+
+  IOBuf buf;
+  EXPECT_EQ(buf.to<std::string>(), "");
+
+  auto temp = &buf;
+  temp->insertAfterThisOne(IOBuf::copyBuffer("Hello"));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::copyBuffer(" and"));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::copyBuffer(" goodbye."));
+
+  auto testAppendTo = [&](auto c) {
+    const StringPiece kExpected = "Hello and goodbye.";
+    EXPECT_EQ(StringPiece(range(buf.to<decltype(c)>())), kExpected);
+
+    const StringPiece kPreviousData = "I was there before. ";
+    c.insert(c.end(), kPreviousData.begin(), kPreviousData.end());
+    buf.appendTo(c);
+    EXPECT_EQ(StringPiece(range(c)), kPreviousData.str() + kExpected.str());
+  };
+
+  testAppendTo(std::string{});
+  testAppendTo(fbstring{});
+  testAppendTo(std::vector<char>{});
+  testAppendTo(std::vector<unsigned char>{});
+}
+
+TEST(IOBuf, FromStringView) {
+  auto literalHelloBuffer = IOBuf::copyBuffer("Hello");
+  std::string hello("Hello");
+  auto fromStringHelloBuffer = IOBuf::copyBuffer(hello);
+  std::string_view hello2("Hello");
+  auto fromStringViewHelloBuffer = IOBuf::copyBuffer(hello2);
+
+  std::string fromLiteral;
+  literalHelloBuffer->appendTo(fromLiteral);
+  std::string fromString;
+  fromStringHelloBuffer->appendTo(fromString);
+  std::string fromStringView;
+  fromStringViewHelloBuffer->appendTo(fromStringView);
+
+  EXPECT_EQ(fromStringView, fromString);
+  EXPECT_EQ(fromLiteral, fromString);
+}
+
+TEST(IOBuf, bufferTooLarge) {
+  EXPECT_THROW(
+      IOBuf::copyBuffer(StringPiece("Hello"), (size_t)0xFFFF'FFFF'FFFF'FFFE),
+      std::length_error);
+}
+
+TEST(IOBuf, copyConstructBufferTooLarge) {
+  auto buf = StringPiece("Hello");
+  EXPECT_THROW(
+      IOBuf(
+          IOBuf::COPY_BUFFER,
+          buf.data(),
+          buf.size(),
+          57,
+          (size_t)0xFFFF'FFFF'FFFF'FFFE),
+      std::bad_alloc);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,10 @@
 #include <chrono>
 #include <thread>
 
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+
+DECLARE_int32(codel_target_delay);
 
 using std::chrono::milliseconds;
 using std::this_thread::sleep_for;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -113,7 +113,8 @@ struct MicroSpinLock {
   }
 };
 static_assert(
-    std::is_pod<MicroSpinLock>::value,
+    std::is_standard_layout<MicroSpinLock>::value &&
+        std::is_trivial<MicroSpinLock>::value,
     "MicroSpinLock must be kept a POD type.");
 
 //////////////////////////////////////////////////////////////////////

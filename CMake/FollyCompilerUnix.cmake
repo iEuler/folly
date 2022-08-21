@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -52,6 +52,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       -Wno-deprecated-declarations
       -Wno-sign-compare
       -Wno-unused
+      -Wuninitialized
       -Wunused-label
       -Wunused-result
       ${FOLLY_CXX_FLAGS}

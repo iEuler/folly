@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 namespace folly {
 namespace test {
 
-REGISTER_TYPED_TEST_CASE_P(
+REGISTER_TYPED_TEST_SUITE_P(
     EventBaseTest,
     ReadEvent,
     ReadPersist,
@@ -49,10 +49,13 @@ REGISTER_TYPED_TEST_CASE_P(
     RunInEventBaseThreadAndWait,
     RunImmediatelyOrRunInEventBaseThreadAndWaitCross,
     RunImmediatelyOrRunInEventBaseThreadAndWaitWithin,
+    RunImmediatelyOrRunInEventBaseThreadAndWaitNotLooping,
+    RunImmediatelyOrRunInEventBaseThreadCross,
     RunImmediatelyOrRunInEventBaseThreadNotLooping,
     RepeatedRunInLoop,
     RunInLoopNoTimeMeasurement,
     RunInLoopStopLoop,
+    RunPoolLoop,
     messageAvailableException,
     TryRunningAfterTerminate,
     CancelRunInLoop,
@@ -60,6 +63,8 @@ REGISTER_TYPED_TEST_CASE_P(
     CallbackOrderTest,
     AlwaysEnqueueCallbackOrderTest,
     IdleTime,
+    MaxLatencyUndamped,
+    UnsetMaxLatencyUndamped,
     ThisLoop,
     EventBaseThreadLoop,
     EventBaseThreadName,
@@ -74,7 +79,7 @@ REGISTER_TYPED_TEST_CASE_P(
     LoopKeepAliveAtomic,
     LoopKeepAliveCast);
 
-REGISTER_TYPED_TEST_CASE_P(
+REGISTER_TYPED_TEST_SUITE_P(
     EventBaseTest1,
     DrivableExecutorTest,
     IOExecutorTest,
@@ -94,9 +99,9 @@ struct DefaultBackendProvider {
     return folly::EventBase::getDefaultBackend();
   }
 };
-INSTANTIATE_TYPED_TEST_CASE_P(
+INSTANTIATE_TYPED_TEST_SUITE_P(
     EventBaseTest, EventBaseTest, DefaultBackendProvider);
-INSTANTIATE_TYPED_TEST_CASE_P(
+INSTANTIATE_TYPED_TEST_SUITE_P(
     EventBaseTest1, EventBaseTest1, DefaultBackendProvider);
 } // namespace test
 } // namespace folly

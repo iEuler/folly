@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -169,7 +169,7 @@ TEST(Timeout, AsyncGenerator) {
     // Completing synchronously with a value.
     auto result = co_await coro::timeout(
         []() -> coro::AsyncGenerator<int> { co_yield 42; }().next(), 1s);
-    EXPECT_EQ(42, result);
+    EXPECT_EQ(42, *result);
 
     // Test that it handles failing synchronously
     auto tryResult = co_await coro::co_awaitTry(coro::timeout(
@@ -179,6 +179,11 @@ TEST(Timeout, AsyncGenerator) {
                     .next(),
         1s));
     EXPECT_TRUE(tryResult.hasException<std::runtime_error>());
+
+    // Generator completing normally.
+    result = co_await coro::timeout(
+        []() -> coro::AsyncGenerator<int> { co_return; }().next(), 1s);
+    EXPECT_FALSE(result);
   }());
 }
 

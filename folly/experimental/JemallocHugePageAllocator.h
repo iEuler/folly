@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,7 +60,10 @@ namespace folly {
  */
 class JemallocHugePageAllocator {
  public:
-  static bool init(int nr_pages);
+  /* initialize with a default number of initial and max pages. */
+  static bool default_init();
+
+  static bool init(int initial_nr_pages, int max_nr_pages = 0);
 
   static void* allocate(size_t size) {
     // If uninitialized, flags_ will be 0 and the mallocx behavior

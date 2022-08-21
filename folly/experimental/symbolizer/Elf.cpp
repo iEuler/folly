@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include <folly/Conv.h>
 #include <folly/Exception.h>
 #include <folly/ScopeGuard.h>
+#include <folly/lang/CString.h>
 #include <folly/portability/Config.h>
 #include <folly/portability/SysMman.h>
 
@@ -53,12 +54,14 @@ ElfFile::ElfFile() noexcept
     : fd_(-1),
       file_(static_cast<char*>(MAP_FAILED)),
       length_(0),
+      fileId_(),
       baseAddress_(0) {}
 
 ElfFile::ElfFile(const char* name, Options const& options)
     : fd_(-1),
       file_(static_cast<char*>(MAP_FAILED)),
       length_(0),
+      fileId_(),
       baseAddress_(0) {
   open(name, options);
 }
@@ -78,7 +81,7 @@ ElfFile::OpenResult ElfFile::openNoThrow(
   // Always close fd and unmap in case of failure along the way to avoid
   // check failure above if we leave fd != -1 and the object is recycled
   auto guard = makeGuard([&] { reset(); });
-  strncat(filepath_, name, kFilepathMaxLen - 1);
+  strlcpy(filepath_, name, kFilepathMaxLen - 1);
   fd_ = ::open(name, options.writable() ? O_RDWR : O_RDONLY);
   if (fd_ == -1) {
     return {kSystemError, "open"};
@@ -88,6 +91,12 @@ ElfFile::OpenResult ElfFile::openNoThrow(
   if (r == -1) {
     return {kSystemError, "fstat"};
   }
+
+  fileId_ = std::make_tuple(
+      st.st_dev,
+      st.st_ino,
+      st.st_size,
+      st.st_mtim.tv_sec * 1000'000'000LL + st.st_mtim.tv_nsec);
 
   length_ = st.st_size;
   int prot = PROT_READ;
@@ -158,13 +167,15 @@ ElfFile::ElfFile(ElfFile&& other) noexcept
     : fd_(other.fd_),
       file_(other.file_),
       length_(other.length_),
+      fileId_(other.fileId_),
       baseAddress_(other.baseAddress_) {
   // copy other.filepath_, leaving filepath_ zero-terminated, always.
-  strncat(filepath_, other.filepath_, kFilepathMaxLen - 1);
+  strlcpy(filepath_, other.filepath_, kFilepathMaxLen - 1);
   other.filepath_[0] = 0;
   other.fd_ = -1;
   other.file_ = static_cast<char*>(MAP_FAILED);
   other.length_ = 0;
+  other.fileId_ = {};
   other.baseAddress_ = 0;
 }
 
@@ -173,16 +184,18 @@ ElfFile& ElfFile::operator=(ElfFile&& other) noexcept {
   reset();
 
   // copy other.filepath_, leaving filepath_ zero-terminated, always.
-  strncat(filepath_, other.filepath_, kFilepathMaxLen - 1);
+  strlcpy(filepath_, other.filepath_, kFilepathMaxLen - 1);
   fd_ = other.fd_;
   file_ = other.file_;
   length_ = other.length_;
+  fileId_ = other.fileId_;
   baseAddress_ = other.baseAddress_;
 
   other.filepath_[0] = 0;
   other.fd_ = -1;
   other.file_ = static_cast<char*>(MAP_FAILED);
   other.length_ = 0;
+  other.fileId_ = {};
   other.baseAddress_ = 0;
 
   return *this;
@@ -200,6 +213,8 @@ void ElfFile::reset() noexcept {
     close(fd_);
     fd_ = -1;
   }
+
+  fileId_ = {};
 }
 
 ElfFile::OpenResult ElfFile::init() noexcept {
@@ -256,17 +271,23 @@ ElfFile::OpenResult ElfFile::init() noexcept {
   }
 
   // We only support executable and shared object files
-  if (elfHeader.e_type != ET_EXEC && elfHeader.e_type != ET_DYN &&
-      elfHeader.e_type != ET_CORE) {
+  if (elfHeader.e_type != ET_REL && elfHeader.e_type != ET_EXEC &&
+      elfHeader.e_type != ET_DYN && elfHeader.e_type != ET_CORE) {
     return {kInvalidElfFile, "invalid ELF file type"};
   }
 
-  if (elfHeader.e_phnum == 0) {
-    return {kInvalidElfFile, "no program header!"};
-  }
+  // We support executable and shared object files and extracting debug info
+  // from relocatable objects (.dwo sections in .o/.dwo files). The e_phnum and
+  // e_phentsize header fileds are not required for relocatable files.
+  // https://docs.oracle.com/cd/E19620-01/805-4693/6j4emccrq/index.html
+  if (elfHeader.e_type != ET_REL) {
+    if (elfHeader.e_phnum == 0) {
+      return {kInvalidElfFile, "no program header!"};
+    }
 
-  if (elfHeader.e_phentsize != sizeof(ElfPhdr)) {
-    return {kInvalidElfFile, "invalid program header entry size"};
+    if (elfHeader.e_phentsize != sizeof(ElfPhdr)) {
+      return {kInvalidElfFile, "invalid program header entry size"};
+    }
   }
 
   if (elfHeader.e_shentsize != sizeof(ElfShdr)) {
@@ -277,13 +298,15 @@ ElfFile::OpenResult ElfFile::init() noexcept {
 
   // Program headers are sorted by load address, so the first PT_LOAD
   // header gives us the base address.
-  const ElfPhdr* programHeader =
-      iterateProgramHeaders([](auto& h) { return h.p_type == PT_LOAD; });
+  if (elfHeader.e_type != ET_REL) {
+    const ElfPhdr* programHeader =
+        iterateProgramHeaders([](auto& h) { return h.p_type == PT_LOAD; });
 
-  if (!programHeader) {
-    return {kInvalidElfFile, "could not find base address"};
+    if (!programHeader) {
+      return {kInvalidElfFile, "could not find base address"};
+    }
+    baseAddress_ = programHeader->p_vaddr;
   }
-  baseAddress_ = programHeader->p_vaddr;
 
   return {kSuccess, nullptr};
 }
@@ -436,6 +459,23 @@ const char* ElfFile::getSymbolName(Symbol symbol) const noexcept {
 
   return getString(
       *getSectionByIndex(symbol.first->sh_link), symbol.second->st_name);
+}
+
+std::pair<const int, char const*> ElfFile::posixFadvise(
+    off_t offset, off_t len, int const advice) const noexcept {
+  if (fd_ == -1) {
+    return {1, "file not open"};
+  }
+  int res = posix_fadvise(fd_, offset, len, advice);
+  if (res != 0) {
+    return {res, "posix_fadvise failed for file"};
+  }
+  return {res, ""};
+}
+
+std::pair<const int, char const*> ElfFile::posixFadvise(
+    int const advice) const noexcept {
+  return posixFadvise(0, 0, advice);
 }
 
 } // namespace symbolizer

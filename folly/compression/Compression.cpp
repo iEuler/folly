@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -168,12 +168,7 @@ bool Codec::canUncompress(
 std::string Codec::doCompressString(const StringPiece data) {
   const IOBuf inputBuffer{IOBuf::WRAP_BUFFER, data};
   auto outputBuffer = doCompress(&inputBuffer);
-  std::string output;
-  output.reserve(outputBuffer->computeChainDataLength());
-  for (auto range : *outputBuffer) {
-    output.append(reinterpret_cast<const char*>(range.data()), range.size());
-  }
-  return output;
+  return outputBuffer->to<std::string>();
 }
 
 std::string Codec::doUncompressString(

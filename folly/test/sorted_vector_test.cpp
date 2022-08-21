@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -188,6 +188,7 @@ TEST(SortedVectorTypes, SimpleSetTest) {
   EXPECT_TRUE(range.second != cs2.end());
   EXPECT_TRUE(cs2.count(32) == 1);
   EXPECT_FALSE(cs2.find(32) == cs2.end());
+  EXPECT_TRUE(cs2.contains(32));
 
   // Bad insert hint.
   s2.insert(s2.begin() + 3, 33);
@@ -200,6 +201,7 @@ TEST(SortedVectorTypes, SimpleSetTest) {
   it = s2.find(32);
   EXPECT_FALSE(it == s2.end());
   s2.erase(it);
+  EXPECT_FALSE(cs2.contains(32));
   EXPECT_TRUE(s2.size() == oldSz);
   check_invariant(s2);
 
@@ -248,12 +250,29 @@ TEST(SortedVectorTypes, TransparentSetTest) {
   EXPECT_EQ(world, *s.find(world));
   EXPECT_TRUE(s.end() == s.find(zebra));
 
+  // find 2 keys
+  constexpr folly::StringPiece values[] = {buddy, hello, stake, world, zebra};
+  for (auto& v0 : values) {
+    for (auto& v1 : values) {
+      auto [it0, it1] = s.find(v0, v1);
+      EXPECT_TRUE(s.find(v0) == it0);
+      EXPECT_TRUE(s.find(v1) == it1);
+    }
+  }
+
   // count
   EXPECT_EQ(0, s.count(buddy));
   EXPECT_EQ(1, s.count(hello));
   EXPECT_EQ(0, s.count(stake));
   EXPECT_EQ(1, s.count(world));
   EXPECT_EQ(0, s.count(zebra));
+
+  // contains
+  EXPECT_FALSE(s.contains(buddy));
+  EXPECT_TRUE(s.contains(hello));
+  EXPECT_FALSE(s.contains(stake));
+  EXPECT_TRUE(s.contains(world));
+  EXPECT_FALSE(s.contains(zebra));
 
   // lower_bound
   EXPECT_TRUE(s.find(hello) == s.lower_bound(buddy));
@@ -305,8 +324,10 @@ TEST(SortedVectorTypes, SimpleMapTest) {
   EXPECT_TRUE(m.count(32) == 1);
   EXPECT_DOUBLE_EQ(100.0, m.at(32));
   EXPECT_FALSE(m.find(32) == m.end());
+  EXPECT_TRUE(m.contains(32));
   m.erase(32);
   EXPECT_TRUE(m.find(32) == m.end());
+  EXPECT_FALSE(m.contains(32));
   check_invariant(m);
   EXPECT_THROW(m.at(32), std::out_of_range);
 
@@ -420,6 +441,43 @@ TEST(SortedVectorTypes, TransparentMapTest) {
         std::make_pair(m.lower_bound(value), m.upper_bound(value)) ==
         m.equal_range(value))
         << value;
+  }
+}
+
+TEST(SortedVectorTypes, Find2) {
+  size_t sizes[] = {0, 1, 2, 31, 32, 33};
+  for (auto size : sizes) {
+    sorted_vector_set<int> s;
+    for (size_t i = 0; i < size; i++) {
+      s.insert(2 * i + 1);
+    }
+    // test find2 with every possible combination of pair of keys
+    for (size_t i = 0; i < 2 * size + 2; i++) {
+      for (size_t j = 0; j < 2 * size + 2; j++) {
+        auto expected0 = s.find(i);
+        auto expected1 = s.find(j);
+        auto [it0, it1] = s.find(i, j);
+        EXPECT_EQ(it0, expected0);
+        EXPECT_EQ(it1, expected1);
+      }
+    }
+  }
+
+  for (auto size : sizes) {
+    sorted_vector_map<int, int> m;
+    for (size_t i = 0; i < size; i++) {
+      m.emplace(2 * i + 1, i);
+    }
+    // test find2 with every possible combination of pair of keys
+    for (size_t i = 0; i < 2 * size + 2; i++) {
+      for (size_t j = 0; j < 2 * size + 2; j++) {
+        auto expected0 = m.find(i);
+        auto expected1 = m.find(j);
+        auto [it0, it1] = m.find(i, j);
+        EXPECT_EQ(it0, expected0);
+        EXPECT_EQ(it1, expected1);
+      }
+    }
   }
 }
 
@@ -630,6 +688,19 @@ TEST(SortedVectorTypes, EraseTest2) {
   EXPECT_EQ(m.size(), 5);
 }
 
+TEST(SortedVectorTypes, EraseIfTest) {
+  sorted_vector_set<int> s1{1, 2, 3, 4, 5, 6, 7, 8, 9};
+  EXPECT_EQ(erase_if(s1, [](int i) { return i % 3 == 0; }), 3);
+  EXPECT_EQ(s1, sorted_vector_set<int>({1, 2, 4, 5, 7, 8}));
+
+  sorted_vector_map<int, int> m1{{1, 10}, {2, 20}, {3, 30}, {4, 44}};
+  EXPECT_EQ(
+      erase_if(m1, [](const auto& kv) { return kv.second == 10 * kv.first; }),
+      3);
+  EXPECT_EQ(m1.size(), 1);
+  EXPECT_EQ(*m1.begin(), std::make_pair(4, 44));
+}
+
 TEST(SortedVectorTypes, TestSetBulkInsertionSortMerge) {
   auto s = std::vector<int>({6, 4, 8, 2});
 
@@ -704,31 +775,49 @@ TEST(SortedVectorTypes, TestSetBulkInsertionSortNoMerge) {
 }
 
 TEST(SortedVectorTypes, TestSetBulkInsertionNoSortMerge) {
-  auto s = std::vector<int>({6, 4, 8, 2});
+  auto test = [](bool withSortedUnique) {
+    auto s = std::vector<int>({6, 4, 8, 2});
 
-  sorted_vector_set<int> vset(s.begin(), s.end());
-  check_invariant(vset);
+    sorted_vector_set<int> vset(s.begin(), s.end());
+    check_invariant(vset);
 
-  // Add a sorted range that will have to be merged in.
-  s = std::vector<int>({1, 3, 5, 9});
+    // Add a sorted range that will have to be merged in.
+    s = std::vector<int>({1, 2, 3, 5, 9});
 
-  vset.insert(s.begin(), s.end());
-  check_invariant(vset);
-  EXPECT_THAT(vset, testing::ElementsAreArray({1, 2, 3, 4, 5, 6, 8, 9}));
+    if (withSortedUnique) {
+      vset.insert(s.begin(), s.end());
+    } else {
+      vset.insert(folly::sorted_unique, s.begin(), s.end());
+    }
+    check_invariant(vset);
+    EXPECT_THAT(vset, testing::ElementsAreArray({1, 2, 3, 4, 5, 6, 8, 9}));
+  };
+
+  test(false);
+  test(true);
 }
 
 TEST(SortedVectorTypes, TestSetBulkInsertionNoSortNoMerge) {
-  auto s = std::vector<int>({6, 4, 8, 2});
+  auto test = [](bool withSortedUnique) {
+    auto s = std::vector<int>({6, 4, 8, 2});
 
-  sorted_vector_set<int> vset(s.begin(), s.end());
-  check_invariant(vset);
+    sorted_vector_set<int> vset(s.begin(), s.end());
+    check_invariant(vset);
 
-  // Add a sorted range that will not have to be merged in.
-  s = std::vector<int>({21, 22, 23, 24});
+    // Add a sorted range that will not have to be merged in.
+    s = std::vector<int>({21, 22, 23, 24});
 
-  vset.insert(s.begin(), s.end());
-  check_invariant(vset);
-  EXPECT_THAT(vset, testing::ElementsAreArray({2, 4, 6, 8, 21, 22, 23, 24}));
+    if (withSortedUnique) {
+      vset.insert(s.begin(), s.end());
+    } else {
+      vset.insert(folly::sorted_unique, s.begin(), s.end());
+    }
+    check_invariant(vset);
+    EXPECT_THAT(vset, testing::ElementsAreArray({2, 4, 6, 8, 21, 22, 23, 24}));
+  };
+
+  test(false);
+  test(true);
 }
 
 TEST(SortedVectorTypes, TestSetBulkInsertionEmptyRange) {

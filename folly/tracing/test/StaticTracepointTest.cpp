@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@
 #include <folly/portability/Unistd.h>
 #include <folly/tracing/test/StaticTracepointTestModule.h>
 
-#if FOLLY_HAS_STD
+#if FOLLY_HAVE_SDT
 
 static const std::string kUSDTSubsectionName = FOLLY_SDT_NOTE_NAME;
 static const int kUSDTNoteType = FOLLY_SDT_NOTE_TYPE;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -26,10 +28,17 @@
 #include <glog/logging.h>
 
 #include <folly/Portability.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
 
 using std::shared_ptr;
 using std::unique_ptr;
+
+extern "C" FOLLY_KEEP void check_copy_construction() {
+  folly::Expected<std::string, int> x;
+  auto y = x;
+  folly::detail::keep_sink_nx(y);
+}
 
 namespace folly {
 
@@ -572,7 +581,7 @@ TEST(Expected, AssignmentContained) {
 
 TEST(Expected, Exceptions) {
   Expected<int, E> empty;
-  EXPECT_THROW(empty.value(), Unexpected<E>::BadExpectedAccess);
+  EXPECT_THROW(empty.value(), BadExpectedAccess<E>);
 }
 
 struct ThrowingBadness {
@@ -763,7 +772,7 @@ TEST(Expected, ThenOrThrow) {
     EXPECT_THROW(
         (Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.thenOrThrow(
             [](std::unique_ptr<int> p) { return *p; })),
-        Unexpected<E>::BadExpectedAccess);
+        BadExpectedAccess<E>);
   }
 
   {
@@ -786,7 +795,76 @@ TEST(Expected, ThenOrThrow) {
     EXPECT_THROW(
         (Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.thenOrThrow(
             [](std::unique_ptr<int> p) { return *p; }, [](E) {})),
-        Unexpected<E>::BadExpectedAccess);
+        BadExpectedAccess<E>);
+  }
+}
+
+TEST(Expected, orElse) {
+  {
+    auto e =
+        Expected<std::unique_ptr<int>, E>{in_place, std::make_unique<int>(42)}
+            .orElse([](E) { throw std::runtime_error(""); });
+    EXPECT_EQ(42, *e.value());
+  }
+
+  {
+    EXPECT_THROW(
+        (Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.orElse(
+            [](E) { throw std::runtime_error(""); })),
+        std::runtime_error);
+  }
+
+  // Chaining
+  {
+    auto ex = Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.orElse(
+        [](E) { return 42; },
+        [](auto i) { return i == 42 ? std::string("yes") : std::string("no"); },
+        [](auto s) {
+          return std::make_unique<int>(s == std::string("yes") ? 10 : 5);
+        });
+    EXPECT_TRUE(bool(ex));
+    EXPECT_EQ(10, *ex.value());
+  }
+
+  {
+    auto ex = Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.orElse(
+        [](E) { return makeExpected<E>(42); },
+        [](int i) {
+          return i == 42 ? std::make_unique<int>(10) : std::make_unique<int>(5);
+        });
+    EXPECT_TRUE(bool(ex));
+    EXPECT_EQ(10, *ex.value());
+  }
+
+  // Chaining to throw
+  {
+    EXPECT_THROW(
+        (Expected<std::unique_ptr<int>, E>{unexpected, E::E1}.orElse(
+            [](E) { return makeExpected<E>(42); },
+            [](int) { throw std::runtime_error("what"); })),
+        std::runtime_error);
+  }
+  // Chaining without error, void returning
+  {
+    auto e = Expected<std::string, E>{in_place, "Hello World"}.orElse(
+        [](E) {
+          EXPECT_TRUE(false);
+          throw std::runtime_error("");
+        },
+        [](int) {
+          EXPECT_TRUE(false);
+          throw std::runtime_error("what");
+        });
+    EXPECT_EQ("Hello World", e.value());
+  }
+
+  // Chaining without error, non void returning
+  {
+    auto e = Expected<std::string, E>{in_place, "Hello World"}.orElse([](E) {
+      EXPECT_TRUE(false);
+      return std::string("Goodbye World");
+    });
+    EXPECT_EQ(std::string("Hello World"), e.value());
   }
 }
 
@@ -877,4 +955,23 @@ TEST(Expected, ConstructorConstructibleNotConvertible) {
     ce = e;
   }
 }
+
+TEST(Expected, TestUnique) {
+  auto mk = []() -> Expected<std::unique_ptr<int>, int> {
+    return std::make_unique<int>(1);
+  };
+
+  EXPECT_EQ(
+      2, **mk().then([](auto r) { return std::make_unique<int>(*r + 1); }));
+
+  // Test converting errors works
+  struct Convertible {
+    /* implicit */ operator int() const noexcept { return 17; }
+  };
+  EXPECT_EQ(
+      2, **mk().then([](auto r) -> Expected<std::unique_ptr<int>, Convertible> {
+        return std::make_unique<int>(*r + 1);
+      }));
+}
+
 } // namespace folly

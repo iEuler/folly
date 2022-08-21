@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -189,7 +189,7 @@ class DistributedMutex {
    * It is undefined behavior to unlock from a thread that did not lock the
    * mutex
    */
-  void unlock(DistributedMutexStateProxy);
+  void unlock(DistributedMutexStateProxy const&);
 
   /**
    * Try to acquire the mutex
@@ -340,4 +340,3 @@ using DistributedMutex = detail::distributed_mutex::DistributedMutex<>;
 } // namespace folly
 
 #include <folly/synchronization/DistributedMutex-inl.h>
-#include <folly/synchronization/DistributedMutexSpecializations.h>

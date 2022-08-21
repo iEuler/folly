@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <list>
 #include <map>
 #include <set>
 #include <tuple>
@@ -29,6 +30,18 @@
 #include <vector>
 
 #include <folly/portability/GTest.h>
+
+class IteratorTest : public testing::Test {};
+
+TEST_F(IteratorTest, iterator_has_known_distance_v) {
+  EXPECT_FALSE((folly::iterator_has_known_distance_v<int*, int const*>));
+  EXPECT_TRUE((folly::iterator_has_known_distance_v<int*, int*>));
+}
+
+TEST_F(IteratorTest, range_has_known_distance_v) {
+  EXPECT_FALSE(folly::range_has_known_distance_v<std::list<int>&>);
+  EXPECT_TRUE(folly::range_has_known_distance_v<std::vector<int>&>);
+}
 
 namespace {
 /**

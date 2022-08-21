@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -111,7 +111,6 @@ LogStreamProcessor::LogStreamProcessor(
       message_{std::move(msg)},
       stream_{this} {}
 
-#ifdef __INCLUDE_LEVEL__
 namespace {
 LogCategory* getXlogCategory(XlogFileScopeInfo* fileScopeInfo) {
   // By the time a LogStreamProcessor is created, the XlogFileScopeInfo object
@@ -165,7 +164,6 @@ LogStreamProcessor::LogStreamProcessor(
           functionName,
           INTERNAL,
           std::string()) {}
-#endif
 
 /*
  * We intentionally define the LogStreamProcessor destructor in

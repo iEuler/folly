@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,9 +41,12 @@ void StandardLogHandler::handleMessage(
   if (message.getLevel() < getLevel()) {
     return;
   }
-  writer_->writeMessage(formatter_->formatMessage(message, handlerCategory));
+  std::string formattedMessage =
+      formatter_->formatMessage(message, handlerCategory);
   if (message.getLevel() >= syncLevel_.load(std::memory_order_relaxed)) {
-    flush();
+    writer_->writeMessageSync(std::move(formattedMessage));
+  } else {
+    writer_->writeMessage(std::move(formattedMessage));
   }
 }
 

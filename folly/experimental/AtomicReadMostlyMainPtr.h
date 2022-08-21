@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,9 +28,8 @@
 namespace folly {
 
 namespace detail {
-struct AtomicReadMostlyTag;
 extern Indestructible<std::mutex> atomicReadMostlyMu;
-extern Indestructible<rcu_domain<AtomicReadMostlyTag>> atomicReadMostlyDomain;
+extern Indestructible<rcu_domain> atomicReadMostlyDomain;
 } // namespace detail
 
 /*
@@ -59,11 +58,11 @@ class AtomicReadMostlyMainPtr {
 
   ReadMostlySharedPtr<T> load(
       std::memory_order order = std::memory_order_seq_cst) const {
-    auto token = detail::atomicReadMostlyDomain->lock_shared();
+    detail::atomicReadMostlyDomain->lock();
     // Synchronization point with the store in storeLocked().
     auto index = curMainPtrIndex_.load(order);
     auto result = mainPtrs_[index].getShared();
-    detail::atomicReadMostlyDomain->unlock_shared(std::move(token));
+    detail::atomicReadMostlyDomain->unlock();
     return result;
   }
 
@@ -143,14 +142,16 @@ class AtomicReadMostlyMainPtr {
     DCHECK(newMain.get() == nullptr)
         << "Invariant should ensure that at most one version is non-null";
     newMain.reset(std::move(ptr));
-    // If order is acq_rel, it should degrade to just release, since this is a
-    // store rather than an RMW. (Of course, this is such a slow method that we
-    // don't really care, but precision is its own reward. If TSAN one day
-    // understands asymmetric barriers, this will also improve its error
-    // detection here). We get our "acquire-y-ness" from the mutex.
+    // If order is acq_rel, it should degrade to just release, and if acquire to
+    // relaxed, since this is a store rather than an RMW. (Of course, this is
+    // such a slow method that we don't really care, but precision is its own
+    // reward. If TSAN one day understands asymmetric barriers, this will also
+    // improve its error detection here). We get our "acquire-y-ness" from the
+    // mutex.
     auto realOrder =
-        (order == std::memory_order_acq_rel ? std::memory_order_release
-                                            : order);
+        (order == std::memory_order_acq_rel       ? std::memory_order_release
+             : order == std::memory_order_acquire ? std::memory_order_relaxed
+                                                  : order);
     // After this, read-side critical sections can access both versions, but
     // new ones will use newMain.
     // This is also synchronization point with loads.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -48,6 +49,42 @@ using bool_constant = std::integral_constant<bool, B>;
 
 template <std::size_t I>
 using index_constant = std::integral_constant<std::size_t, I>;
+
+//  always_false
+//
+//  A variable template that is always false but requires template arguments to
+//  be provided (which are then ignored). This is useful in very specific cases
+//  where we want type-dependent expressions to defer static_assert's.
+//
+//  A common use-case is for exhaustive constexpr if branches:
+//
+//    template <typename T>
+//    void foo(T value) {
+//      if constexpr (std::is_integral_v<T>) foo_integral(value);
+//      else if constexpr (std::is_same_v<T, std::string>) foo_string(value);
+//      else static_assert(always_false<T>, "Unsupported type");
+//    }
+//
+//  If we had used static_assert(false), then this would always fail to compile,
+//  even if foo is never instantiated!
+//
+//  Another use case is if a template that is expected to always be specialized
+//  is erroneously instantiated with the base template.
+//
+//    template <typename T>
+//    struct Foo {
+//      static_assert(always_false<T>, "Unsupported type");
+//    };
+//    template <>
+//    struct Foo<int> {};
+//
+//    Foo<int> a;         // fine
+//    Foo<std::string> b; // fails! And you get a nice (custom) error message
+//
+//  This is similar to leaving the base template undefined but we get a nicer
+//  compiler error message with static_assert.
+template <typename...>
+FOLLY_INLINE_VARIABLE constexpr bool always_false = false;
 
 namespace detail {
 
@@ -302,7 +339,7 @@ struct detected_<void_t<T<A...>>, D, T, A...> {
 //
 //  If T<A...> substitutes, has member type alias value_t as std::true_type
 //  and has member type alias type as T<A...>. Otherwise, has member type
-//  alias value_t as std::false_type and has member type alias as D.
+//  alias value_t as std::false_type and has member type alias type as D.
 //
 //  mimic: std::experimental::detected_or, Library Fundamentals TS v2
 template <typename D, template <typename...> class T, typename... A>
@@ -727,7 +764,7 @@ bool less_than_impl(LHS const lhs) {
       (!std::is_signed<RHS>::value && is_negative(lhs)) ? true :
       (!std::is_signed<LHS>::value && is_negative(rhs)) ? false :
       rhs > std::numeric_limits<LHS>::max() ? true :
-      rhs <= std::numeric_limits<LHS>::min() ? false :
+      rhs <= std::numeric_limits<LHS>::lowest() ? false :
       lhs < rhs;
   // clang-format on
 }
@@ -740,7 +777,7 @@ bool greater_than_impl(LHS const lhs) {
       (!std::is_signed<RHS>::value && is_negative(lhs)) ? false :
       (!std::is_signed<LHS>::value && is_negative(rhs)) ? true :
       rhs > std::numeric_limits<LHS>::max() ? false :
-      rhs < std::numeric_limits<LHS>::min() ? true :
+      rhs < std::numeric_limits<LHS>::lowest() ? true :
       lhs > rhs;
   // clang-format on
 }
@@ -865,5 +902,72 @@ struct make_unsigned<uint128_t> {
   using type = uint128_t;
 };
 #endif // FOLLY_HAVE_INT128_T
+
+namespace traits_detail {
+template <std::size_t>
+struct uint_bits_t_ {};
+template <>
+struct uint_bits_t_<8> : type_t_<std::uint8_t> {};
+template <>
+struct uint_bits_t_<16> : type_t_<std::uint16_t> {};
+template <>
+struct uint_bits_t_<32> : type_t_<std::uint32_t> {};
+template <>
+struct uint_bits_t_<64> : type_t_<std::uint64_t> {};
+#if FOLLY_HAVE_INT128_T
+template <>
+struct uint_bits_t_<128> : type_t_<uint128_t> {};
+#endif // FOLLY_HAVE_INT128_T
+} // namespace traits_detail
+
+template <std::size_t bits>
+using uint_bits_t = _t<traits_detail::uint_bits_t_<bits>>;
+
+template <std::size_t lg_bits>
+using uint_bits_lg_t = uint_bits_t<(1u << lg_bits)>;
+
+template <std::size_t bits>
+using int_bits_t = make_signed_t<uint_bits_t<bits>>;
+
+template <std::size_t lg_bits>
+using int_bits_lg_t = make_signed_t<uint_bits_lg_t<lg_bits>>;
+
+namespace traits_detail {
+
+template <std::size_t I, typename T>
+struct type_pack_element_indexed_type {};
+
+template <typename, typename...>
+struct type_pack_element_set;
+template <std::size_t... I, typename... T>
+struct type_pack_element_set<std::index_sequence<I...>, T...>
+    : type_pack_element_indexed_type<I, T>... {};
+template <typename... T>
+using type_pack_element_set_t =
+    type_pack_element_set<std::index_sequence_for<T...>, T...>;
+
+template <std::size_t I>
+struct type_pack_element_test {
+  template <typename T>
+  static T impl(type_pack_element_indexed_type<I, T>*);
+};
+
+template <std::size_t I, typename... Ts>
+using type_pack_element_fallback = decltype(type_pack_element_test<I>::impl(
+    static_cast<type_pack_element_set_t<Ts...>*>(nullptr)));
+
+} // namespace traits_detail
+
+#if FOLLY_HAS_BUILTIN(__type_pack_element)
+
+template <std::size_t I, typename... Ts>
+using type_pack_element_t = __type_pack_element<I, Ts...>;
+
+#else
+
+template <std::size_t I, typename... Ts>
+using type_pack_element_t = traits_detail::type_pack_element_fallback<I, Ts...>;
+
+#endif
 
 } // namespace folly

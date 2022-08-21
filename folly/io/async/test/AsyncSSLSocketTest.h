@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -204,6 +204,21 @@ class ExpectWriteErrorCallback : public WriteCallbackBase {
         exception.getType(),
         AsyncSocketException::AsyncSocketExceptionType::NETWORK_ERROR);
     EXPECT_EQ(exception.getErrno(), 22);
+    // Suppress the assert in  ~WriteCallbackBase()
+    state = STATE_SUCCEEDED;
+  }
+};
+
+class ExpectSSLWriteErrorCallback : public WriteCallbackBase {
+ public:
+  explicit ExpectSSLWriteErrorCallback(SendMsgParamsCallbackBase* mcb = nullptr)
+      : WriteCallbackBase(mcb) {}
+
+  ~ExpectSSLWriteErrorCallback() override {
+    EXPECT_EQ(STATE_FAILED, state);
+    EXPECT_EQ(
+        exception.getType(),
+        AsyncSocketException::AsyncSocketExceptionType::SSL_ERROR);
     // Suppress the assert in  ~WriteCallbackBase()
     state = STATE_SUCCEEDED;
   }
@@ -463,18 +478,16 @@ class EmptyReadCallback : public ReadCallback {
 
 class MockCertificateIdentityVerifier : public CertificateIdentityVerifier {
  public:
-  MOCK_CONST_METHOD1(
-      verifyLeafImpl, Try<Unit>(const AsyncTransportCertificate&));
-  // decorate to add noexcept
-  virtual Try<Unit> verifyLeaf(const AsyncTransportCertificate& leafCertificate)
-      const noexcept override {
-    return verifyLeafImpl(leafCertificate);
-  }
+  MOCK_METHOD(
+      std::unique_ptr<AsyncTransportCertificate>,
+      verifyLeaf,
+      (const AsyncTransportCertificate&),
+      (const));
 };
 
 class MockHandshakeCB : public AsyncSSLSocket::HandshakeCB {
  public:
-  MOCK_METHOD3(handshakeVerImpl, bool(AsyncSSLSocket*, bool, X509_STORE_CTX*));
+  MOCK_METHOD(bool, handshakeVerImpl, (AsyncSSLSocket*, bool, X509_STORE_CTX*));
   virtual bool handshakeVer(
       AsyncSSLSocket* sock,
       bool preverifyOk,
@@ -482,13 +495,13 @@ class MockHandshakeCB : public AsyncSSLSocket::HandshakeCB {
     return handshakeVerImpl(sock, preverifyOk, ctx);
   }
 
-  MOCK_METHOD1(handshakeSucImpl, void(AsyncSSLSocket*));
+  MOCK_METHOD(void, handshakeSucImpl, (AsyncSSLSocket*));
   virtual void handshakeSuc(AsyncSSLSocket* sock) noexcept override {
     handshakeSucImpl(sock);
   }
 
-  MOCK_METHOD2(
-      handshakeErrImpl, void(AsyncSSLSocket*, const AsyncSocketException&));
+  MOCK_METHOD(
+      void, handshakeErrImpl, (AsyncSSLSocket*, const AsyncSocketException&));
   virtual void handshakeErr(
       AsyncSSLSocket* sock, const AsyncSocketException& ex) noexcept override {
     handshakeErrImpl(sock, ex);
@@ -875,11 +888,15 @@ class AlpnServer : private AsyncSSLSocket::HandshakeCB,
   explicit AlpnServer(AsyncSSLSocket::UniquePtr socket)
       : nextProto(nullptr), nextProtoLength(0), socket_(std::move(socket)) {
     socket_->sslAccept(this);
+    socket_->enableClientHelloParsing();
   }
 
   const unsigned char* nextProto;
   unsigned nextProtoLength;
   folly::Optional<AsyncSocketException> except;
+  const std::vector<std::string>& getClientAlpns() const {
+    return socket_->getClientAlpns();
+  }
 
  private:
   void handshakeSuc(AsyncSSLSocket*) noexcept override {
@@ -949,6 +966,10 @@ class SNIClient : private AsyncSSLSocket::HandshakeCB,
     socket_->sslConn(this);
   }
 
+  std::string getApplicationProtocol() {
+    return socket_->getApplicationProtocol();
+  }
+
   bool serverNameMatch;
 
  private:
@@ -984,6 +1005,10 @@ class SNIServer : private AsyncSSLSocket::HandshakeCB,
     ctx->setServerNameCallback(
         std::bind(&SNIServer::serverNameCallback, this, std::placeholders::_1));
     socket_->sslAccept(this);
+  }
+
+  std::string getApplicationProtocol() {
+    return socket_->getApplicationProtocol();
   }
 
   bool serverNameMatch;

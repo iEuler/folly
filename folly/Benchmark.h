@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <folly/ScopeGuard.h>
 #include <folly/Traits.h>
 #include <folly/functional/Invoke.h>
+#include <folly/lang/Hint.h>
 #include <folly/portability/GFlags.h>
 
 #include <cassert>
@@ -35,7 +36,8 @@
 #include <boost/function_types/function_arity.hpp>
 #include <glog/logging.h>
 
-DECLARE_bool(benchmark);
+FOLLY_GFLAGS_DECLARE_bool(benchmark);
+FOLLY_GFLAGS_DECLARE_uint32(bm_result_width_chars);
 
 namespace folly {
 
@@ -363,7 +365,7 @@ void printResultComparison(
  * Allow users to record customized counter during benchmarking,
  * there will be one extra column showing in the output result for each counter
  *
- * BENCHMARK_COUNTERS(insertVectorBegin, couters, iters) {
+ * BENCHMARK_COUNTERS(insertVectorBegin, counters, iters) {
  *   vector<int> v;
  *   FOR_EACH_RANGE (i, 0, iters) {
  *     v.insert(v.begin(), 42);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,8 +82,6 @@ Task<typename semi_await_try_result_t<SemiAwaitable>::element_type> timeout(
     }
 
     co_return std::move(resultTry).value();
-  } catch (const std::exception& ex) {
-    error = exception_wrapper{std::current_exception(), ex};
   } catch (...) {
     error = exception_wrapper{std::current_exception()};
   }

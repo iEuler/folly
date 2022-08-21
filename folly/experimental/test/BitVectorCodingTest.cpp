@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include <random>
 #include <vector>
 
+#include <folly/Portability.h>
+#if FOLLY_X64
 #include <folly/Benchmark.h>
 #include <folly/experimental/BitVectorCoding.h>
 #include <folly/experimental/Select64.h>
@@ -211,3 +213,4 @@ int main(int argc, char** argv) {
 
   return ret;
 }
+#endif

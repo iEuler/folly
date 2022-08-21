@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -306,8 +306,8 @@ struct MockTraits {
 
   ~MockTraits() { instance = nullptr; }
 
-  MOCK_METHOD2(onAllocate, void(std::string*, std::string));
-  MOCK_METHOD1(onRecycle, void(std::string*));
+  MOCK_METHOD(void, onAllocate, (std::string*, std::string));
+  MOCK_METHOD(void, onRecycle, (std::string*));
 
   struct Forwarder {
     static void initialize(std::string* ptr) { new (ptr) std::string(); }

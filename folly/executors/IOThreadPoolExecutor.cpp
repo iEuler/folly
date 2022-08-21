@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 #include <folly/detail/MemoryIdler.h>
 #include <folly/portability/GFlags.h>
 
-DEFINE_bool(
+FOLLY_GFLAGS_DEFINE_bool(
     dynamic_iothreadpoolexecutor,
     true,
     "IOThreadPoolExecutor will dynamically create threads");
@@ -82,16 +82,19 @@ IOThreadPoolExecutor::IOThreadPoolExecutor(
     size_t numThreads,
     std::shared_ptr<ThreadFactory> threadFactory,
     EventBaseManager* ebm,
-    bool waitForAll)
+    Options options)
     : ThreadPoolExecutor(
           numThreads,
           FLAGS_dynamic_iothreadpoolexecutor ? 0 : numThreads,
-          std::move(threadFactory),
-          waitForAll),
+          std::move(threadFactory)),
+      isWaitForAll_(options.waitForAll),
       nextThread_(0),
       eventBaseManager_(ebm) {
   setNumThreads(numThreads);
   registerThreadPoolExecutor(this);
+  if (options.enableThreadIdCollection) {
+    threadIdCollector_ = std::make_unique<ThreadIdWorkerProvider>();
+  }
 }
 
 IOThreadPoolExecutor::IOThreadPoolExecutor(
@@ -99,13 +102,16 @@ IOThreadPoolExecutor::IOThreadPoolExecutor(
     size_t minThreads,
     std::shared_ptr<ThreadFactory> threadFactory,
     EventBaseManager* ebm,
-    bool waitForAll)
-    : ThreadPoolExecutor(
-          maxThreads, minThreads, std::move(threadFactory), waitForAll),
+    Options options)
+    : ThreadPoolExecutor(maxThreads, minThreads, std::move(threadFactory)),
+      isWaitForAll_(options.waitForAll),
       nextThread_(0),
       eventBaseManager_(ebm) {
   setNumThreads(maxThreads);
   registerThreadPoolExecutor(this);
+  if (options.enableThreadIdCollection) {
+    threadIdCollector_ = std::make_unique<ThreadIdWorkerProvider>();
+  }
 }
 
 IOThreadPoolExecutor::~IOThreadPoolExecutor() {
@@ -159,7 +165,7 @@ IOThreadPoolExecutor::pickThread() {
     // the second case, `!me` so we'll crash anyway.
     return me;
   }
-  auto thread = ths[nextThread_.fetch_add(1, std::memory_order_relaxed) % n];
+  auto thread = ths[nextThread_++ % n];
   return std::static_pointer_cast<IOThread>(thread);
 }
 
@@ -172,12 +178,36 @@ EventBase* IOThreadPoolExecutor::getEventBase() {
   return pickThread()->eventBase;
 }
 
+std::vector<Executor::KeepAlive<EventBase>>
+IOThreadPoolExecutor::getAllEventBases() {
+  ensureMaxActiveThreads();
+  std::vector<Executor::KeepAlive<EventBase>> evbs;
+  SharedMutex::ReadHolder r{&threadListLock_};
+  const auto& threads = threadList_.get();
+  evbs.reserve(threads.size());
+  for (const auto& thr : threads) {
+    evbs.emplace_back(static_cast<IOThread&>(*thr).eventBase);
+  }
+  return evbs;
+}
+
 EventBase* IOThreadPoolExecutor::getEventBase(
     ThreadPoolExecutor::ThreadHandle* h) {
   auto thread = dynamic_cast<IOThread*>(h);
 
   if (thread) {
     return thread->eventBase;
+  }
+
+  return nullptr;
+}
+
+std::mutex* IOThreadPoolExecutor::getEventBaseShutdownMutex(
+    ThreadPoolExecutor::ThreadHandle* h) {
+  auto thread = dynamic_cast<IOThread*>(h);
+
+  if (thread) {
+    return &thread->eventBaseShutdownMutex_;
   }
 
   return nullptr;
@@ -197,6 +227,16 @@ void IOThreadPoolExecutor::threadRun(ThreadPtr thread) {
   const auto ioThread = std::static_pointer_cast<IOThread>(thread);
   ioThread->eventBase = eventBaseManager_->getEventBase();
   thisThread_.reset(new std::shared_ptr<IOThread>(ioThread));
+
+  auto tid = folly::getOSThreadID();
+  if (threadIdCollector_) {
+    threadIdCollector_->addTid(tid);
+  }
+  SCOPE_EXIT {
+    if (threadIdCollector_) {
+      threadIdCollector_->removeTid(tid);
+    }
+  };
 
   auto idler = std::make_unique<MemoryIdlerTimeout>(ioThread->eventBase);
   ioThread->eventBase->runBeforeLoop(idler.get());
